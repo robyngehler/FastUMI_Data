@@ -44,11 +44,20 @@
           "z": 0.1483
       },
       "distances": {
-          "marker_max": 566.0,
-          "marker_min": 140.0,
+          "marker_max": 514.5,
+          "marker_min": 108.9,
           "gripper_max": 850.0,
           "gripper_min": 0,
           "flange_to_tcp": 0.093
+      },
+      "frame_conventions": {
+          "runtime_raw_frame": "panda_link8",
+          "ik_target_frame": "panda_hand_tcp",
+          "fastumi_tcp_frame": "panda_softtip",
+          "link8_to_hand_rotation_deg_z": -45.0,
+          "link8_to_hand_translation_m": 0.1034,
+          "soft_tip_offset_m": 0.093,
+          "notes": "For the local Panda URDF, the operational hand frame includes the fixed 0.1034 m hand_tcp extension beyond panda_link8. FastUMI TCP then extends further forward in local z. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
       },
       "start_qpos": [
           0, 0, -0.02792803756892681, -0.47473636269569397, 

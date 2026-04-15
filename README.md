@@ -153,7 +153,7 @@ Alternatively, use the provided shell script.
 
 ### 3.3 🏹 Inverse Kinematics (IK) Computation
 - A simple IK computation is implemented to convert TCP data into the corresponding absolute joint angles of the robot arm, which facilitates ACT model training.
-- To calculate IK, the distance from the TCP to the flange must be obtained. The `distances` field in the `config.json` file includes this distance as `flange_to_tcp`.
+- To calculate IK, the distance from the stored TCP to the IK target frame must be obtained. The `distances` field in the `config.json` file includes this distance as `flange_to_tcp`. For the Panda FastUMI path, this field is used as the `panda_hand_tcp -> panda_softtip` offset.
 
 ### 3.4 🎄 Different Types of Data Processing
 - To accommodate different types of algorithms, the scripts `data_processing_to_joint.py` and `data_processing_to_tcp.py` provide methods for generating the absolute joint angles and TCP data of the robot arm, respectively.

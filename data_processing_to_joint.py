@@ -31,6 +31,11 @@ print(f"Number of joints in the chain: {len(my_chain)}")
 def calculate_new_pose(x, y, z, quaternion, distance):
     """
     Calculate a new pose by translating along the negative Z-axis of the given pose.
+
+    In the Panda FastUMI path, the stored TCP pose is panda_softtip and
+    `distance` corresponds to the operational panda_hand_tcp -> panda_softtip offset.
+    This means the returned pose is the IK target frame (operational panda_hand_tcp)
+    while preserving orientation.
     """
     rotation = R.from_quat(quaternion)
     rotation_matrix = rotation.as_matrix()

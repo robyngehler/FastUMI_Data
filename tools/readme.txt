@@ -11,10 +11,10 @@ python calibrate_fastumi_gripper_scaling.py \
 
 ## capture panda init pose:
 ~~~bash
-python capture_panda_anchor_pose_polymetis.py \
+python capture_panda_anchor_pose_fastumi.py \
   --server-ip 192.168.1.10 \
   --with-gripper \
-  --output panda_anchor_pose.json
+  --output panda_anchor_pose_fastumi.json
 ~~~
 
 ## trim episodes:

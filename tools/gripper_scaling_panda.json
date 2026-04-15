@@ -1,0 +1,37 @@
+{
+  "created_at_utc": "2026-04-15T10:42:07.043397+00:00",
+  "image_topic": "/usb_cam/image_raw",
+  "marker_ids": [
+    0,
+    1
+  ],
+  "aruco_dict": "DICT_4X4_50",
+  "open_summary": {
+    "count": 10,
+    "median_px": 514.5633239746094,
+    "mean_px": 514.4681640625,
+    "std_px": 0.9547504140536341,
+    "min_px": 513.158447265625,
+    "max_px": 516.1453857421875
+  },
+  "closed_summary": {
+    "count": 10,
+    "median_px": 108.98474884033203,
+    "mean_px": 108.90632476806641,
+    "std_px": 0.24931161686689637,
+    "min_px": 108.35416412353516,
+    "max_px": 109.12635803222656
+  },
+  "fastumi_config_snippet": {
+    "distances": {
+      "marker_max": 514.5633239746094,
+      "marker_min": 108.98474884033203,
+      "gripper_max": 0.07
+    }
+  },
+  "notes": [
+    "FastUMI maps marker distance linearly from marker_min..marker_max to gripper_max.",
+    "Use the medians as a robust starting point, then validate on real episodes.",
+    "For calibration this script only accepts frames with BOTH markers visible."
+  ]
+}

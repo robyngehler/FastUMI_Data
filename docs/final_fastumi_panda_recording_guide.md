@@ -215,23 +215,23 @@ Move the Panda manually to the chosen reference pose and record:
 
 Use the provided helper script:
 
-- `capture_panda_anchor_pose_polymetis.py`
+- `capture_panda_anchor_pose_fastumi.py`
 
-This script connects to the control-side Franka ZeroRPC bridge, which forwards to local Polymetis services, waits for a keypress, then stores:
+This script connects to the control-side Franka ZeroRPC bridge, treats the raw runtime pose as `panda_link8`, derives the operational `panda_hand_tcp` frame and the FastUMI TCP, then stores:
 
 - `start_qpos`,
-- TCP position,
-- TCP quaternion,
-- TCP Euler angles,
+- raw `panda_link8` pose,
+- `panda_hand_tcp` pose,
+- FastUMI TCP position/orientation,
 - optional gripper state.
 
 ### Typical use
 
 ```bash
-python capture_panda_anchor_pose_polymetis.py \
+python capture_panda_anchor_pose_fastumi.py \
   --server-ip 192.168.1.10 \
   --with-gripper \
-  --output panda_anchor_pose.json
+  --output panda_anchor_pose_fastumi.json
 ```
 
 ### Important limitation
@@ -713,7 +713,7 @@ If the goal is a clean Panda-compatible FastUMI recording path, the correct orde
 1. **Freeze the mechanical teaching-device assembly.**
 2. **Define the teaching-device tool-center clearly.**
 3. **Choose one Panda anchor pose `q_start`.**
-4. **Capture the Panda anchor with `capture_panda_anchor_pose_polymetis.py`.**
+4. **Capture the Panda anchor with `capture_panda_anchor_pose_fastumi.py`.**
 5. **Build a repeatable teaching-device start dock.**
 6. **Align the dock so the teaching-device tool-center corresponds to the Panda TCP anchor pose.**
 7. **Measure and validate the T265-to-tool offset.**
@@ -730,28 +730,30 @@ That is the disciplined version of the workflow. The alternative is debugging ge
 
 ## 13. Script reference
 
-## 13.1 `capture_panda_anchor_pose_polymetis.py`
+## 13.1 `capture_panda_anchor_pose_fastumi.py`
 
 Use this for:
 
 - `start_qpos`
-- Panda anchor TCP pose
+- raw `panda_link8` anchor pose
+- `panda_hand_tcp` anchor pose
+- FastUMI TCP anchor pose
 - optional gripper state snapshot
 
 Output:
 
 - JSON file with `start_qpos`
-- TCP position
-- TCP quaternion
-- TCP Euler angles
+- raw `panda_link8` pose metadata
+- `panda_hand_tcp` pose
+- FastUMI TCP pose
 
 Example:
 
 ```bash
-python capture_panda_anchor_pose_polymetis.py \
+python capture_panda_anchor_pose_fastumi.py \
   --server-ip 192.168.1.10 \
   --with-gripper \
-  --output panda_anchor_pose.json
+  --output panda_anchor_pose_fastumi.json
 ```
 
 ## 13.2 `calibrate_fastumi_gripper_scaling.py`
@@ -792,5 +794,5 @@ Primary references used to ground this guide:
 - public `data_processing_to_joint.py`
 - Polymetis user documentation
 - helper scripts:
-  - `capture_panda_anchor_pose_polymetis.py`
+  - `capture_panda_anchor_pose_fastumi.py`
   - `calibrate_fastumi_gripper_scaling.py`

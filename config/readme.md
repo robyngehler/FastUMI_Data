@@ -139,15 +139,15 @@ The following configuration is based on the coordinate system conversion shown i
 
 ### Position & Orientation
 
-- **base_position**: Initial Tool Center Point position of Robot arm (there is Xarm6).
-- **base_orientation**: Initial Tool Center Point orientation of Robot arm (there is Xarm6).
+- **base_position**: Initial Tool Center Point position of Robot arm. For Panda FastUMI, this should be the FastUMI TCP anchor pose, not `panda_link8`, not bare `panda_hand`, and not the intermediate `panda_hand_tcp` frame.
+- **base_orientation**: Initial Tool Center Point orientation of Robot arm. For Panda FastUMI, this should be the FastUMI TCP anchor orientation, not the intermediate hand-aligned frame.
 - **offset**: Positional offsets of the RealSense T265 relative to the Tool Center Point on Handheld Device.
 
 ### Distance Parameters
 
 - **marker_max / marker_min** (`float`): Marker detection distance range.
 - **gripper_max / gripper_min** (`float`): Gripper open/close range (Refers to the value transmitted in the gripper control command).
-- **flange_to_tcp** (`float`): Distance from flange to Tool Center Point.
+- **flange_to_tcp** (`float`): Distance from the IK target frame to the stored TCP. In the Panda FastUMI path this is used as the `panda_hand_tcp -> panda_softtip` offset.
 
 ### Initial Joint Positions
 
