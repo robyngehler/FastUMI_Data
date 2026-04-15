@@ -1,6 +1,6 @@
 {
   "device_settings": {
-      "robot_type": "PANDA",
+      "robot_type": "XARM6",
       "data_dir": "./",
       "device": "cpu"
   },
@@ -27,33 +27,37 @@
       "dp_train_data_dir": "./dataset/dp_train_data.zarr.zip",
       "dp_data_res": "224, 224",
       "compression_level": 99,
-      "urdf_path": "./assets/fer_franka_hand.urdf",
+      "urdf_path": "./assets/xarm6_robot.urdf",
       "aruco_dict": "DICT_4X4_50",
       "base_position": {
-          "x": 0.49643,
-          "y": -0.00588,
-          "z": 0.35984
+          "x": 0.511536,
+          "y": -0.33415,
+          "z": 0.151975
       },
       "base_orientation": {
-          "roll": 179.94725,
-          "pitch": -89.999981,
-          "yaw": 0.0
+          "roll": -96.0658235652354,
+          "pitch": -11.223990037434254,
+          "yaw": -85.12529642046707
       },
       "offset": {
-          "x": 0.1489,
-          "z": 0.1483
+          "x": 0.14565,
+          "z": 0.1586
       },
       "distances": {
           "marker_max": 566.0,
           "marker_min": 140.0,
           "gripper_max": 850.0,
           "gripper_min": 0,
-          "flange_to_tcp": 0.093
+          "flange_to_tcp": 0.25
       },
       "start_qpos": [
-          0, 0, -0.02792803756892681, -0.47473636269569397, 
-          -0.0384012907743454, -0.022689493373036385,
-          -1.057666301727295, 0.0034878887236118317
-      ]
+          0.9383513927459717,
+            -1.5932590961456299,
+            -2.120824098587036,
+            -2.159956932067871,
+            -1.9906229972839355,
+            3.4741716384887695,
+            -2.487581491470337
+        ]
   }
 }
