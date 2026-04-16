@@ -27,25 +27,25 @@
       "dp_train_data_dir": "./dataset/dp_train_data.zarr.zip",
       "dp_data_res": "224, 224",
       "compression_level": 99,
-      "urdf_path": "./assets/fer_franka_hand.urdf",
+      "urdf_path": "./assets/panda_arm_hand.urdf",
       "aruco_dict": "DICT_4X4_50",
       "base_position": {
-          "x": 0.49643,
-          "y": -0.00588,
-          "z": 0.35984
+          "x": 0.64071,
+          "y": -0.34948,
+          "z": 0.37141
       },
       "base_orientation": {
-          "roll": 179.94725,
-          "pitch": -89.999981,
-          "yaw": 0.0
+          "roll": -135.9873,
+          "pitch": 79.4097,
+          "yaw": -135.8613
       },
       "offset": {
           "x": 0.1489,
           "z": 0.1483
       },
       "distances": {
-          "marker_max": 514.5,
-          "marker_min": 108.9,
+          "marker_max": 513.18,
+          "marker_min": 113.57,
           "gripper_max": 850.0,
           "gripper_min": 0,
           "flange_to_tcp": 0.093
@@ -60,9 +60,13 @@
           "notes": "For the local Panda URDF, the operational hand frame includes the fixed 0.1034 m hand_tcp extension beyond panda_link8. FastUMI TCP then extends further forward in local z. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
       },
       "start_qpos": [
-          0, 0, -0.02792803756892681, -0.47473636269569397, 
-          -0.0384012907743454, -0.022689493373036385,
-          -1.057666301727295, 0.0034878887236118317
+          1.1461714506149292,
+            -1.5383373498916626,
+            -1.5858408212661743,
+            -2.0414700508117676,
+            -2.0066282749176025,
+            3.025059461593628,
+            -2.0232622623443604
       ]
   }
 }
