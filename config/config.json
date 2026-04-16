@@ -27,7 +27,8 @@
       "dp_train_data_dir": "./dataset/dp_train_data.zarr.zip",
       "dp_data_res": "224, 224",
       "compression_level": 99,
-      "urdf_path": "./assets/panda_arm_hand.urdf",
+      "urdf_path": "./assets/fer_franka_hand.urdf",
+      "ik_base_elements": ["base"],
       "aruco_dict": "DICT_4X4_50",
       "base_position": {
           "x": 0.64071,
@@ -57,7 +58,7 @@
           "link8_to_hand_rotation_deg_z": -45.0,
           "link8_to_hand_translation_m": 0.1034,
           "soft_tip_offset_m": 0.093,
-          "notes": "For the local Panda URDF, the operational hand frame includes the fixed 0.1034 m hand_tcp extension beyond panda_link8. FastUMI TCP then extends further forward in local z. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
+          "notes": "The runtime bridge still reports panda_link8. For IK postprocessing, use the serial fer_franka_hand.urdf because it terminates at hand_tcp, whereas panda_arm_hand.urdf branches into a finger link in ikpy. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
       },
       "start_qpos": [
           1.1461714506149292,

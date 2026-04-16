@@ -1,6 +1,6 @@
 {
   "device_settings": {
-      "robot_type": "XARM6",
+      "robot_type": "PANDA",
       "data_dir": "./",
       "device": "cpu"
   },
@@ -27,37 +27,47 @@
       "dp_train_data_dir": "./dataset/dp_train_data.zarr.zip",
       "dp_data_res": "224, 224",
       "compression_level": 99,
-      "urdf_path": "./assets/xarm6_robot.urdf",
+      "urdf_path": "./assets/fer_franka_hand.urdf",
+      "ik_base_elements": ["base"],
       "aruco_dict": "DICT_4X4_50",
       "base_position": {
-          "x": 0.511536,
-          "y": -0.33415,
-          "z": 0.151975
+          "x": 0.64071,
+          "y": -0.34948,
+          "z": 0.37141
       },
       "base_orientation": {
-          "roll": -96.0658235652354,
-          "pitch": -11.223990037434254,
-          "yaw": -85.12529642046707
+          "roll": -135.9873,
+          "pitch": 79.4097,
+          "yaw": -135.8613
       },
       "offset": {
-          "x": 0.14565,
-          "z": 0.1586
+          "x": 0.1489,
+          "z": 0.1483
       },
       "distances": {
-          "marker_max": 566.0,
-          "marker_min": 140.0,
+          "marker_max": 513.18,
+          "marker_min": 113.57,
           "gripper_max": 850.0,
           "gripper_min": 0,
-          "flange_to_tcp": 0.25
+          "flange_to_tcp": 0.093
+      },
+      "frame_conventions": {
+          "runtime_raw_frame": "panda_link8",
+          "ik_target_frame": "panda_hand_tcp",
+          "fastumi_tcp_frame": "panda_softtip",
+          "link8_to_hand_rotation_deg_z": -45.0,
+          "link8_to_hand_translation_m": 0.1034,
+          "soft_tip_offset_m": 0.093,
+          "notes": "The runtime bridge still reports panda_link8. For IK postprocessing, use the serial fer_franka_hand.urdf because it terminates at hand_tcp, whereas panda_arm_hand.urdf branches into a finger link in ikpy. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
       },
       "start_qpos": [
-          0.9383513927459717,
-            -1.5932590961456299,
-            -2.120824098587036,
-            -2.159956932067871,
-            -1.9906229972839355,
-            3.4741716384887695,
-            -2.487581491470337
+          1.1461714506149292,
+            -1.5383373498916626,
+            -1.5858408212661743,
+            -2.0414700508117676,
+            -2.0066282749176025,
+            3.025059461593628,
+            -2.0232622623443604
         ]
   }
 }

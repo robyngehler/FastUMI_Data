@@ -9,6 +9,33 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import json
 
+
+def infer_ik_base_elements(urdf_path):
+    urdf_name = os.path.basename(urdf_path)
+    if urdf_name == 'xarm6_robot.urdf':
+        return ['world']
+    if urdf_name == 'fer_franka_hand.urdf':
+        return ['base']
+    if urdf_name == 'panda_arm_hand.urdf':
+        return ['panda_link0']
+    raise ValueError(
+        f"Unable to infer IK base element for {urdf_name}. "
+        "Set data_process_config.ik_base_elements explicitly in config/config.json."
+    )
+
+
+def get_revolute_joint_indices(chain):
+    return [
+        index for index, link in enumerate(chain.links)
+        if getattr(link, 'joint_type', None) == 'revolute'
+    ]
+
+
+def expand_revolute_joint_seed(revolute_joint_angles):
+    full_seed = np.zeros(len(my_chain.links), dtype=np.float64)
+    full_seed[REVOLUTE_JOINT_INDICES] = np.asarray(revolute_joint_angles, dtype=np.float64)
+    return full_seed
+
 # Load the configuration from the config.json file
 with open('config/config.json', 'r') as config_file:
     config = json.load(config_file)
@@ -17,15 +44,26 @@ config = config["data_process_config"]
 # Extract configuration values
 START_QPOS = config["start_qpos"] # Initial joint positions for the robot (values specific to your robot's configuration)
 PI = np.pi
+IK_BASE_ELEMENTS = config.get("ik_base_elements") or infer_ik_base_elements(config["urdf_path"])
 
 # Load the robot chain
-my_chain = ikpy.chain.Chain.from_urdf_file(config["urdf_path"], base_elements=['world']) # Path to the URDF file of the robot model (replace with your robot's URDF file in config.json)
+my_chain = ikpy.chain.Chain.from_urdf_file(config["urdf_path"], base_elements=IK_BASE_ELEMENTS) # Path to the URDF file of the robot model (replace with your robot's URDF file in config.json)
+my_chain.active_links_mask = [getattr(link, 'joint_type', None) == 'revolute' for link in my_chain.links]
+REVOLUTE_JOINT_INDICES = get_revolute_joint_indices(my_chain)
+
+if len(START_QPOS) != len(REVOLUTE_JOINT_INDICES):
+    raise ValueError(
+        f"start_qpos has {len(START_QPOS)} entries, but {config['urdf_path']} exposes "
+        f"{len(REVOLUTE_JOINT_INDICES)} revolute joints in ikpy."
+    )
 
 # Load predefined ArUco dictionary
 aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, config["aruco_dict"]))
 parameters = cv2.aruco.DetectorParameters()
 
 print(f"Number of joints in the chain: {len(my_chain)}")
+print(f"IK base elements: {IK_BASE_ELEMENTS}")
+print(f"Revolute joint indices: {REVOLUTE_JOINT_INDICES}")
 
 
 def calculate_new_pose(x, y, z, quaternion, distance):
@@ -144,8 +182,8 @@ def normalize_ik_and_save_hdf5(args):
     Normalize input data and save processed HDF5 files.
     """
     input_file, output_file = args
-    base_x, base_y, base_z = config["base_position"]["x"], config["base_position"]["y"], config["base_position"]["z"] # Initial position of the robot's base in 3D space (in meters)
-    base_roll, base_pitch, base_yaw = np.deg2rad([config["base_orientation"]["roll"], config["base_orientation"]["pitch"], config["base_orientation"]["yaw"]]) # Initial orientation of the robot's base in 3D space (in roll, pitch, yaw format) (in degrees)
+    base_x, base_y, base_z = config["base_position"]["x"], config["base_position"]["y"], config["base_position"]["z"] # FastUMI TCP anchor position in the robot base frame (in meters)
+    base_roll, base_pitch, base_yaw = np.deg2rad([config["base_orientation"]["roll"], config["base_orientation"]["pitch"], config["base_orientation"]["yaw"]]) # FastUMI TCP anchor orientation in the robot base frame (roll, pitch, yaw in degrees)
     rotation_base_to_local = R.from_euler('xyz', [base_roll, base_pitch, base_yaw]).as_matrix()
 
     T_base_to_local = np.eye(4)
@@ -186,15 +224,15 @@ def normalize_ik_and_save_hdf5(args):
                 direction, quaternion = calculate_new_pose(
                     direction[0], direction[1], direction[2], q, config["distances"]["flange_to_tcp"])
                 if i == 0:
-                    initial_joint_angles = np.array(START_QPOS)
+                    initial_joint_angles = expand_revolute_joint_seed(START_QPOS)
                     full_joint_angles = cartesian_to_joints(
                         direction, quaternion, initial_joint_angles)
                 else:
                     full_joint_angles = cartesian_to_joints(
                         direction, quaternion, initial_joint_angles)
                 initial_joint_angles = full_joint_angles
-                six_dof_joint_angles = full_joint_angles[2:]
-                joint_angles.append(six_dof_joint_angles)
+                revolute_joint_angles = full_joint_angles[REVOLUTE_JOINT_INDICES]
+                joint_angles.append(revolute_joint_angles)
 
             joint_angles = np.array(joint_angles)
 

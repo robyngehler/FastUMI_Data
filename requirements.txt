@@ -11,6 +11,7 @@ einops
 packaging
 h5py
 ipython
+click
 opencv-contrib-python
 ikpy
 pyrealsense2

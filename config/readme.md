@@ -22,7 +22,7 @@ Defines the robot type, data directory, and computational device.
 
 ```json
 "device_settings": {
-    "robot_type": "XARM6",
+    "robot_type": "PANDA",
     "data_dir": "./",
     "device": "cpu"
 }
@@ -87,6 +87,8 @@ We have already performed coordinate transformation in the code. The correspondi
   <figcaption>Coordinate system of Xarm6</figcaption>
 </figure>
 
+The figure above is the legacy xArm6 example from the original FastUMI release. For Panda FastUMI, use the active Panda config and Panda recording guide as the source of truth for frame semantics and IK settings.
+
 
 The following configuration is based on the coordinate system conversion shown in the figure.
 
@@ -101,30 +103,39 @@ The following configuration is based on the coordinate system conversion shown i
     "dp_train_data_dir": "./dataset/dp_train_data.zarr.zip",
     "dp_data_res": "224, 224",
     "compression_level": 99,
-    "urdf_path": "./assets/xarm6_robot.urdf",
+    "urdf_path": "./assets/fer_franka_hand.urdf",
+    "ik_base_elements": ["base"],
     "aruco_dict": "DICT_4X4_50",
     "base_position": {
-        "x": 0.49643,
-        "y": -0.00588,
-        "z": 0.35984
+        "x": 0.64071,
+        "y": -0.34948,
+        "z": 0.37141
     },
     "base_orientation": {
-        "roll": 179.94725,
-        "pitch": -89.999981,
-        "yaw": 0.0
+        "roll": -135.9873,
+        "pitch": 79.4097,
+        "yaw": -135.8613
     },
     "offset": {
-        "x": 0.14565,
-        "z": 0.1586
+        "x": 0.1489,
+        "z": 0.1483
     },
     "distances": {
-        "marker_max": 566.0,
-        "marker_min": 140.0,
+        "marker_max": 513.18,
+        "marker_min": 113.57,
         "gripper_max": 850.0,
         "gripper_min": 0,
-        "flange_to_tcp": 0.25
+        "flange_to_tcp": 0.093
     },
-    "start_qpos": [0, 0, -0.0279, -0.4747, -0.0384, -0.0227, -1.0577, 0.0035]
+    "frame_conventions": {
+        "runtime_raw_frame": "panda_link8",
+        "ik_target_frame": "panda_hand_tcp",
+        "fastumi_tcp_frame": "panda_softtip",
+        "link8_to_hand_rotation_deg_z": -45.0,
+        "link8_to_hand_translation_m": 0.1034,
+        "soft_tip_offset_m": 0.093
+    },
+    "start_qpos": [1.1461714506149292, -1.5383373498916626, -1.5858408212661743, -2.0414700508117676, -2.0066282749176025, 3.025059461593628, -2.0232622623443604]
 }
 ```
 
@@ -135,6 +146,7 @@ The following configuration is based on the coordinate system conversion shown i
 - **dp_data_res** (`string`): Image resolution for data processing.
 - **compression_level** (`integer`): Compression level for data storage.
 - **urdf_path** (`string`): Path to the URDF file.
+- **ik_base_elements** (`array[string]`): URDF base-link hint for `ikpy`. This is required when the robot base link is not `world`.
 - **aruco_dict** (`string`): Type of ArUco dictionary.
 
 ### Position & Orientation
@@ -151,7 +163,7 @@ The following configuration is based on the coordinate system conversion shown i
 
 ### Initial Joint Positions
 
-- **start_qpos** (`array`): Initial positions for each joint of Robot arm (there is Xarm6).
+- **start_qpos** (`array`): Initial positions for the robot arm's actuated joints. For Panda this is a 7-joint seed; for xArm6 it is a 6-joint seed.
 
 ---
 

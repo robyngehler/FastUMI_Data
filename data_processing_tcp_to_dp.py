@@ -18,6 +18,21 @@ with open('config/config.json', 'r') as config_file:
     config = json.load(config_file)
 config = config["data_process_config"]
 
+TCP_POSE_DIM = 7
+
+
+def split_tcp_action(action_data):
+    if action_data.shape[1] < TCP_POSE_DIM + 1:
+        raise ValueError(
+            f"Expected TCP HDF5 action data to contain at least {TCP_POSE_DIM + 1} columns "
+            f"([x, y, z, qx, qy, qz, qw, gripper]), but got shape {action_data.shape}."
+        )
+
+    pos = np.asarray(action_data[:, :3])
+    rot_quat_xyzw = np.asarray(action_data[:, 3:TCP_POSE_DIM])
+    gripper_width = np.asarray(action_data[:, -1])
+    return pos, rot_quat_xyzw, gripper_width
+
 def mat_to_pos_rot(mat):
     pos = (mat[...,:3,3].T / mat[...,3,3].T).T
     rot = Rotation.from_matrix(mat[...,:3,:3])
@@ -70,10 +85,8 @@ def main():
     for _, hdf5_file in enumerate(hdf5_files):
         hdf5_path = os.path.join(input_folder_dir, hdf5_file)
         with h5py.File(hdf5_path, 'r') as f:
-            action_data = f['action']
-            pos = np.array(action_data[:,:3])
-            rot_quat_xyzw = np.array(action_data[:, 3:7])
-            gripper_width = np.array(action_data[:, 7])
+            action_data = np.asarray(f['action'])
+            pos, rot_quat_xyzw, gripper_width = split_tcp_action(action_data)
 
         rot = Rotation.from_quat(rot_quat_xyzw)
         pose = np.zeros((pos.shape[0], 4, 4), dtype=np.float32)

@@ -93,8 +93,8 @@ def transform_to_base_quat(x, y, z, qx, qy, qz, qw, T_base_to_local):
 
 def normalize_and_save_base_tcp_hdf5(args):
     input_file, output_file = args
-    base_x, base_y, base_z = config["base_position"]["x"], config["base_position"]["y"], config["base_position"]["z"] # Initial position of the robot's base in 3D space (in meters)
-    base_roll, base_pitch, base_yaw = np.deg2rad([config["base_orientation"]["roll"], config["base_orientation"]["pitch"], config["base_orientation"]["yaw"]]) # Initial orientation of the robot's base in 3D space (in roll, pitch, yaw format) (in degrees)
+    base_x, base_y, base_z = config["base_position"]["x"], config["base_position"]["y"], config["base_position"]["z"] # FastUMI TCP anchor position in the robot base frame (in meters)
+    base_roll, base_pitch, base_yaw = np.deg2rad([config["base_orientation"]["roll"], config["base_orientation"]["pitch"], config["base_orientation"]["yaw"]]) # FastUMI TCP anchor orientation in the robot base frame (roll, pitch, yaw in degrees)
     rotation_base_to_local = R.from_euler('xyz', [base_roll, base_pitch, base_yaw]).as_matrix()
     
     T_base_to_local = np.eye(4)
