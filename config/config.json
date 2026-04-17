@@ -5,7 +5,7 @@
       "device": "cpu"
   },
   "task_config": {
-      "episode_len": 180,
+      "episode_len": 400,
       "state_dim": 7,
       "action_dim": 7,
       "cam_width": 1920,

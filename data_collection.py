@@ -21,6 +21,7 @@ import threading
 from collections import deque
 from datetime import datetime
 import pandas as pd
+import gc
 
 # Load configuration from config.json
 with open('config/config.json', 'r') as f:
@@ -176,6 +177,31 @@ def start_recording():
     video_thread.join()
     trajectory_thread.join()
 
+
+def get_next_episode_path(base_dir):
+    episode_indices = []
+    for name in os.listdir(base_dir):
+        if not name.startswith('episode_') or not name.endswith('.hdf5'):
+            continue
+        try:
+            episode_indices.append(int(name[len('episode_'):-len('.hdf5')]))
+        except ValueError:
+            continue
+
+    next_index = max(episode_indices, default=-1) + 1
+    return os.path.join(base_dir, f'episode_{next_index}.hdf5')
+
+
+def get_nearest_trajectory_indices(trajectory_timestamps, frame_timestamps):
+    insert_positions = np.searchsorted(trajectory_timestamps, frame_timestamps)
+    insert_positions = np.clip(insert_positions, 0, len(trajectory_timestamps) - 1)
+    previous_positions = np.clip(insert_positions - 1, 0, len(trajectory_timestamps) - 1)
+
+    use_previous = np.abs(trajectory_timestamps[previous_positions] - frame_timestamps) <= np.abs(
+        trajectory_timestamps[insert_positions] - frame_timestamps
+    )
+    return np.where(use_previous, previous_positions, insert_positions)
+
 if __name__ == "__main__":
     # Initialize subscribers
     start_time = 0
@@ -209,10 +235,6 @@ if __name__ == "__main__":
                 first_time_judger = True
                 print(f"Episode {episode + 1}/{num_episodes} started!")
 
-                # Initialize buffers
-                obs_replay = []
-                action_replay = []
-
                 # Start recording
                 try:
                     start_recording()
@@ -222,66 +244,85 @@ if __name__ == "__main__":
                 finally:
                     frame_timestamp_writer.writerow([episode, first_frame_timestamp])
                     video_writer.release()
-
-                    # Data list preparation
-                    data_dict = {
-                        '/observations/qpos': [],
-                        '/action': [],
-                    }
-                    for cam_name in cfg['camera_names']:
-                        data_dict[f'/observations/images/{cam_name}'] = []
-                    timestamp_file.close()
                     timestamps = pd.read_csv(TIMESTAMP_PATH_TEMP)
                     downsampled_timestamps = timestamps.iloc[::3].reset_index(drop=True)
                     cap = cv2.VideoCapture(VIDEO_PATH_TEMP.replace("_n", f"_{episode}"))
 
-                    for idx, row in tqdm(downsampled_timestamps.iterrows(), desc='Extracting Images'):
-                        frame_idx = row['Frame Index']
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                        ret, frame = cap.read()
-                        if ret:
-                            filename = f"{int(frame_idx / 3)}.jpg"
-                            cv2.imwrite(os.path.join(IMAGE_PATH, filename), frame)
-                            for cam_name in cfg['camera_names']:
-                                data_dict[f'/observations/images/{cam_name}'].append(frame)
-
-                    cap.release()
-
                     # Process trajectory data
                     trajectory = pd.read_csv(TRAJECTORY_PATH_TEMP)
                     trajectory['Timestamp'] = trajectory['Timestamp'].astype(float)
+                    trajectory_timestamps = trajectory['Timestamp'].to_numpy()
+                    frame_timestamps = downsampled_timestamps['Timestamp'].to_numpy(dtype=float)
+                    target_frame_indices = downsampled_timestamps['Frame Index'].to_numpy(dtype=int)
+                    nearest_indices = get_nearest_trajectory_indices(trajectory_timestamps, frame_timestamps)
 
-                    for idx, row in tqdm(downsampled_timestamps.iterrows(), desc='Extracting States'):
-                        closest_idx = (np.abs(trajectory['Timestamp'] - row['Timestamp'])).argmin()
-                        closest_row = trajectory.iloc[closest_idx]
-                        pos_quat = [
-                            closest_row['Pos X'], closest_row['Pos Y'], closest_row['Pos Z'],
-                            closest_row['Q_X'], closest_row['Q_Y'], closest_row['Q_Z'], closest_row['Q_W']
-                        ]
-                        data_dict['/observations/qpos'].append(pos_quat)
-                        data_dict['/action'].append(pos_quat)
-                        with open(STATE_PATH, 'a', newline='') as csv_file2:
-                            csv_writer2 = csv.writer(csv_file2)
-                            csv_writer2.writerow([idx, start_time, closest_row['Timestamp'], row['Timestamp']] + pos_quat)
-
-                    max_timesteps = len(data_dict['/observations/qpos'])
-                    idx = len([name for name in os.listdir(data_path) if os.path.isfile(os.path.join(data_path, name))])
-                    dataset_path = os.path.join(data_path, f'episode_{idx}.hdf5')
+                    max_timesteps = len(downsampled_timestamps)
+                    dataset_path = get_next_episode_path(data_path)
                     os.makedirs(os.path.dirname(dataset_path), exist_ok=True)
 
-                    # Save the data
-                    with h5py.File(dataset_path, 'w', rdcc_nbytes=2 * 1024 ** 2) as root:
-                        root.attrs['sim'] = False
-                        obs = root.create_group('observations')
-                        image_grp = obs.create_group('images')
-                        for cam_name in cfg['camera_names']:
-                            image_grp.create_dataset(
-                                cam_name,
-                                data=np.array(data_dict[f'/observations/images/{cam_name}'], dtype=np.uint8),
-                                compression='gzip',
-                                compression_opts=4
-                            )
-                        root.create_dataset('observations/qpos', data=np.array(data_dict['/observations/qpos']))
-                        root.create_dataset('action', data=np.array(data_dict['/action']))
+                    try:
+                        with h5py.File(dataset_path, 'w', rdcc_nbytes=2 * 1024 ** 2) as root:
+                            root.attrs['sim'] = False
+                            obs = root.create_group('observations')
+                            image_grp = obs.create_group('images')
+                            image_datasets = dict()
+                            for cam_name in cfg['camera_names']:
+                                image_datasets[cam_name] = image_grp.create_dataset(
+                                    cam_name,
+                                    shape=(max_timesteps, frame_height, frame_width, 3),
+                                    dtype=np.uint8,
+                                    chunks=(1, frame_height, frame_width, 3),
+                                    compression='gzip',
+                                    compression_opts=4
+                                )
+
+                            qpos_dataset = root.create_dataset('observations/qpos', shape=(max_timesteps, 7), dtype=np.float64)
+                            action_dataset = root.create_dataset('action', shape=(max_timesteps, 7), dtype=np.float64)
+
+                            with open(STATE_PATH, 'a', newline='') as csv_file2:
+                                csv_writer2 = csv.writer(csv_file2)
+                                next_target_idx = 0
+                                current_frame_idx = 0
+
+                                with tqdm(total=max_timesteps, desc='Extracting Images + States') as pbar:
+                                    while next_target_idx < max_timesteps:
+                                        ret, frame = cap.read()
+                                        if not ret:
+                                            raise RuntimeError(
+                                                f"Failed to decode frame {current_frame_idx} from temporary recording before all sampled frames were extracted."
+                                            )
+
+                                        if current_frame_idx == target_frame_indices[next_target_idx]:
+                                            row = downsampled_timestamps.iloc[next_target_idx]
+                                            filename = f"{int(current_frame_idx / 3)}.jpg"
+                                            cv2.imwrite(os.path.join(IMAGE_PATH, filename), frame)
+                                            for cam_name in cfg['camera_names']:
+                                                image_datasets[cam_name][next_target_idx] = frame
+
+                                            closest_row = trajectory.iloc[int(nearest_indices[next_target_idx])]
+                                            pos_quat = [
+                                                closest_row['Pos X'], closest_row['Pos Y'], closest_row['Pos Z'],
+                                                closest_row['Q_X'], closest_row['Q_Y'], closest_row['Q_Z'], closest_row['Q_W']
+                                            ]
+                                            qpos_dataset[next_target_idx] = pos_quat
+                                            action_dataset[next_target_idx] = pos_quat
+                                            csv_writer2.writerow([
+                                                next_target_idx,
+                                                start_time,
+                                                closest_row['Timestamp'],
+                                                row['Timestamp']
+                                            ] + pos_quat)
+
+                                            next_target_idx += 1
+                                            pbar.update(1)
+
+                                        current_frame_idx += 1
+                    finally:
+                        cap.release()
+
+                    del downsampled_timestamps
+                    del trajectory
+                    del timestamps
+                    gc.collect()
 
     print("All episodes completed successfully!")

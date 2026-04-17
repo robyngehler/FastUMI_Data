@@ -1,0 +1,232 @@
+## calib script:
+(FastUMI) slavik@ceti-umi-tower:~/umi/FastUMI_Data/tools$ python calibrate_fastumi_gripper_scaling.py \
+>   --image-topic /usb_cam/image_raw \
+>   --marker-id-0 0 \
+>   --marker-id-1 1 \
+>   --aruco-dict DICT_4X4_50 \
+>   --gripper-max 0.08 \
+>   --output gripper_scaling_panda.json
+
+Interactive controls
+  o : capture current marker distance as OPEN sample
+  c : capture current marker distance as CLOSED sample
+  p : print current statistics
+  r : reset all samples
+  s : save result JSON
+  q : quit
+
+Tip: keep BOTH markers fully visible during calibration. One-marker fallback is intentionally disabled here.
+
+QFontDatabase: Cannot find font directory /home/slavik/miniforge3/envs/FastUMI/lib/python3.8/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/slavik/miniforge3/envs/FastUMI/lib/python3.8/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/slavik/miniforge3/envs/FastUMI/lib/python3.8/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/slavik/miniforge3/envs/FastUMI/lib/python3.8/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/slavik/miniforge3/envs/FastUMI/lib/python3.8/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+Added OPEN sample: 172.330 px
+Added CLOSED sample: 36.569 px
+sSaved calibration result to: /home/slavik/umi/FastUMI_Data/tools/gripper_scaling_panda.json
+(FastUMI) slavik@ceti-umi-tower:~/umi/FastUMI_Data/tools$ s
+
+## t265:
+(base) slavik@ceti-umi-tower:~/umi/FastUMI_Data/tools$ roslaunch realsense2_camera rs_t265.launch 
+... logging to /home/slavik/.ros/log/24a2449a-38ac-11f1-99e2-2b78ece5ae39/roslaunch-ceti-umi-tower-11308.log
+Checking log directory for disk usage. This may take a while.
+Press Ctrl-C to interrupt
+Done checking log file disk usage. Usage is <1GB.
+
+started roslaunch server http://ceti-umi-tower:38829/
+
+SUMMARY
+========
+
+PARAMETERS
+ * /camera/realsense2_camera/accel_fps: -1
+ * /camera/realsense2_camera/accel_frame_id: camera_accel_frame
+ * /camera/realsense2_camera/accel_optical_frame_id: camera_accel_opti...
+ * /camera/realsense2_camera/align_depth: False
+ * /camera/realsense2_camera/aligned_depth_to_color_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/aligned_depth_to_fisheye1_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/aligned_depth_to_fisheye2_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/aligned_depth_to_fisheye_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/aligned_depth_to_infra1_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/aligned_depth_to_infra2_frame_id: camera_aligned_de...
+ * /camera/realsense2_camera/allow_no_texture_points: False
+ * /camera/realsense2_camera/base_frame_id: camera_link
+ * /camera/realsense2_camera/calib_odom_file: 
+ * /camera/realsense2_camera/clip_distance: -1.0
+ * /camera/realsense2_camera/color_fps: 30
+ * /camera/realsense2_camera/color_frame_id: camera_color_frame
+ * /camera/realsense2_camera/color_height: 480
+ * /camera/realsense2_camera/color_optical_frame_id: camera_color_opti...
+ * /camera/realsense2_camera/color_width: 640
+ * /camera/realsense2_camera/confidence_fps: 30
+ * /camera/realsense2_camera/confidence_height: 480
+ * /camera/realsense2_camera/confidence_width: 640
+ * /camera/realsense2_camera/depth_fps: 30
+ * /camera/realsense2_camera/depth_frame_id: camera_depth_frame
+ * /camera/realsense2_camera/depth_height: 480
+ * /camera/realsense2_camera/depth_optical_frame_id: camera_depth_opti...
+ * /camera/realsense2_camera/depth_width: 640
+ * /camera/realsense2_camera/device_type: t265
+ * /camera/realsense2_camera/enable_accel: True
+ * /camera/realsense2_camera/enable_color: True
+ * /camera/realsense2_camera/enable_confidence: True
+ * /camera/realsense2_camera/enable_depth: True
+ * /camera/realsense2_camera/enable_fisheye1: False
+ * /camera/realsense2_camera/enable_fisheye2: False
+ * /camera/realsense2_camera/enable_fisheye: False
+ * /camera/realsense2_camera/enable_gyro: True
+ * /camera/realsense2_camera/enable_infra1: False
+ * /camera/realsense2_camera/enable_infra2: False
+ * /camera/realsense2_camera/enable_infra: False
+ * /camera/realsense2_camera/enable_pointcloud: False
+ * /camera/realsense2_camera/enable_pose: True
+ * /camera/realsense2_camera/enable_sync: False
+ * /camera/realsense2_camera/filters: 
+ * /camera/realsense2_camera/fisheye1_frame_id: camera_fisheye1_f...
+ * /camera/realsense2_camera/fisheye1_optical_frame_id: camera_fisheye1_o...
+ * /camera/realsense2_camera/fisheye2_frame_id: camera_fisheye2_f...
+ * /camera/realsense2_camera/fisheye2_optical_frame_id: camera_fisheye2_o...
+ * /camera/realsense2_camera/fisheye_fps: -1
+ * /camera/realsense2_camera/fisheye_frame_id: camera_fisheye_frame
+ * /camera/realsense2_camera/fisheye_height: -1
+ * /camera/realsense2_camera/fisheye_optical_frame_id: camera_fisheye_op...
+ * /camera/realsense2_camera/fisheye_width: -1
+ * /camera/realsense2_camera/gyro_fps: -1
+ * /camera/realsense2_camera/gyro_frame_id: camera_gyro_frame
+ * /camera/realsense2_camera/gyro_optical_frame_id: camera_gyro_optic...
+ * /camera/realsense2_camera/imu_optical_frame_id: camera_imu_optica...
+ * /camera/realsense2_camera/infra1_frame_id: camera_infra1_frame
+ * /camera/realsense2_camera/infra1_optical_frame_id: camera_infra1_opt...
+ * /camera/realsense2_camera/infra2_frame_id: camera_infra2_frame
+ * /camera/realsense2_camera/infra2_optical_frame_id: camera_infra2_opt...
+ * /camera/realsense2_camera/infra_fps: 30
+ * /camera/realsense2_camera/infra_height: 480
+ * /camera/realsense2_camera/infra_rgb: False
+ * /camera/realsense2_camera/infra_width: 640
+ * /camera/realsense2_camera/initial_reset: False
+ * /camera/realsense2_camera/json_file_path: 
+ * /camera/realsense2_camera/linear_accel_cov: 0.01
+ * /camera/realsense2_camera/odom_frame_id: camera_odom_frame
+ * /camera/realsense2_camera/ordered_pc: False
+ * /camera/realsense2_camera/pointcloud_texture_index: 0
+ * /camera/realsense2_camera/pointcloud_texture_stream: RS2_STREAM_COLOR
+ * /camera/realsense2_camera/pose_frame_id: camera_pose_frame
+ * /camera/realsense2_camera/pose_optical_frame_id: camera_pose_optic...
+ * /camera/realsense2_camera/publish_odom_tf: True
+ * /camera/realsense2_camera/publish_tf: True
+ * /camera/realsense2_camera/reconnect_timeout: 6.0
+ * /camera/realsense2_camera/rosbag_filename: 
+ * /camera/realsense2_camera/serial_no: 
+ * /camera/realsense2_camera/stereo_module/exposure/1: 7500
+ * /camera/realsense2_camera/stereo_module/exposure/2: 1
+ * /camera/realsense2_camera/stereo_module/gain/1: 16
+ * /camera/realsense2_camera/stereo_module/gain/2: 16
+ * /camera/realsense2_camera/tf_publish_rate: 0.0
+ * /camera/realsense2_camera/topic_odom_in: camera/odom_in
+ * /camera/realsense2_camera/unite_imu_method: 
+ * /camera/realsense2_camera/usb_port_id: 
+ * /camera/realsense2_camera/wait_for_device_timeout: -1.0
+ * /rosdistro: noetic
+ * /rosversion: 1.17.4
+
+NODES
+  /camera/
+    realsense2_camera (nodelet/nodelet)
+    realsense2_camera_manager (nodelet/nodelet)
+
+ROS_MASTER_URI=http://localhost:11311
+
+process[camera/realsense2_camera_manager-1]: started with pid [11322]
+process[camera/realsense2_camera-2]: started with pid [11323]
+[INFO] [1776244773.575615767]: Initializing nodelet with 24 worker threads.
+[INFO] [1776244776.342030815]: RealSense ROS v2.3.2
+[INFO] [1776244776.342081360]: Built with LibRealSense v2.50.0
+[INFO] [1776244776.342103402]: Running with LibRealSense v2.50.0
+[INFO] [1776244776.372378965]:  
+[INFO] [1776244776.382770988]: Device with serial number 908412110087 was found.
+
+[INFO] [1776244776.382822318]: Device with physical ID 2-8-3 was found.
+[INFO] [1776244776.382843678]: Device with name Intel RealSense T265 was found.
+[INFO] [1776244776.383436881]: Device with port number 2-8 was found.
+[INFO] [1776244776.383476384]: Device USB type: 3.1
+[INFO] [1776244776.386809163]: No calib_odom_file. No input odometry accepted.
+[INFO] [1776244776.387080708]: getParameters...
+[INFO] [1776244776.424379019]: setupDevice...
+[INFO] [1776244776.424415739]: JSON file is not provided
+[INFO] [1776244776.424432987]: ROS Node Namespace: camera
+[INFO] [1776244776.424455132]: Device Name: Intel RealSense T265
+[INFO] [1776244776.424469375]: Device Serial No: 908412110087
+[INFO] [1776244776.424486593]: Device physical port: 2-8-3
+[INFO] [1776244776.424503369]: Device FW version: 0.2.0.951
+[INFO] [1776244776.424517327]: Device Product ID: 0x0B37
+[INFO] [1776244776.424533941]: Enable PointCloud: Off
+[INFO] [1776244776.424549394]: Align Depth: Off
+[INFO] [1776244776.424566677]: Sync Mode: Off
+[INFO] [1776244776.424591043]: Device Sensors: 
+[INFO] [1776244776.424758200]: Tracking Module was found.
+[INFO] [1776244776.424827131]: (Depth, 0) sensor isn't supported by current device! -- Skipping...
+[INFO] [1776244776.424845072]: (Color, 0) sensor isn't supported by current device! -- Skipping...
+[INFO] [1776244776.424863587]: (Confidence, 0) sensor isn't supported by current device! -- Skipping...
+[INFO] [1776244776.424894910]: num_filters: 0
+[INFO] [1776244776.424914045]: Setting Dynamic reconfig parameters.
+[WARN] [1776244776.426802177]: Param '/camera/tracking_module/frames_queue_size' has value 256 that is not in range [0, 32]. Removing this parameter from dynamic reconfigure options.
+[INFO] [1776244776.429910419]: Done Setting Dynamic reconfig parameters.
+[INFO] [1776244776.429960160]: gyro stream is enabled - fps: 200
+[INFO] [1776244776.429976183]: accel stream is enabled - fps: 62
+[INFO] [1776244776.429989734]: pose stream is enabled - fps: 200
+[INFO] [1776244776.430004940]: setupPublishers...
+[INFO] [1776244776.432710283]: setupStreams...
+[INFO] [1776244776.458119814]: SELECTED BASE:Pose, 0
+[INFO] [1776244776.459933103]: RealSense Node Is Up!
+[WARN] [1776244776.469148273]: 
+ 15/04 11:21:55,786 WARNING [140531195705088] (tm-device.cpp:1291) SLAM_ERROR Speed
+
+## usb cam
+(base) slavik@ceti-umi-tower:~/umi/FastUMI_Data/tools$ roslaunch usb_cam usb_cam-test.launch 
+... logging to /home/slavik/.ros/log/24a2449a-38ac-11f1-99e2-2b78ece5ae39/roslaunch-ceti-umi-tower-11536.log
+Checking log directory for disk usage. This may take a while.
+Press Ctrl-C to interrupt
+Done checking log file disk usage. Usage is <1GB.
+
+started roslaunch server http://ceti-umi-tower:41647/
+
+SUMMARY
+========
+
+PARAMETERS
+ * /image_view/autosize: True
+ * /rosdistro: noetic
+ * /rosversion: 1.17.4
+ * /usb_cam/camera_frame_id: usb_cam
+ * /usb_cam/color_format: yuv422p
+ * /usb_cam/image_height: 480
+ * /usb_cam/image_width: 640
+ * /usb_cam/io_method: mmap
+ * /usb_cam/pixel_format: yuyv
+ * /usb_cam/video_device: /dev/video0
+
+NODES
+  /
+    image_view (image_view/image_view)
+    usb_cam (usb_cam/usb_cam_node)
+
+ROS_MASTER_URI=http://localhost:11311
+
+process[usb_cam-1]: started with pid [11550]
+process[image_view-2]: started with pid [11551]
+[INFO] [1776244817.180339193]: Initializing nodelet with 24 worker threads.
+[INFO] [1776244817.217382375]: Using transport "raw"
+[INFO] [1776244817.240255336]: using default calibration URL
+[INFO] [1776244817.240465051]: camera calibration URL: file:///home/slavik/.ros/camera_info/head_camera.yaml
+[INFO] [1776244817.240492935]: Unable to open camera calibration file [/home/slavik/.ros/camera_info/head_camera.yaml]
+[WARN] [1776244817.240499951]: Camera calibration file /home/slavik/.ros/camera_info/head_camera.yaml not found.
+[INFO] [1776244817.240509370]: Starting 'head_camera' (/dev/video0) at 640x480 via mmap (yuyv) at 30 FPS
+[WARN] [1776244817.322307308]: unknown control 'white_balance_temperature_auto'
+
+[WARN] [1776244817.326547370]: unknown control 'focus_auto'
