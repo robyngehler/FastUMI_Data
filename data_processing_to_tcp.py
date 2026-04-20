@@ -1,32 +1,55 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+from multiprocessing import Pool, cpu_count
+from pathlib import Path
+from typing import Sequence
+
+import cv2
 import h5py
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-import os
-import cv2
 from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
-import json
 
-# Load the configuration from the config.json file
-with open('config/config.json', 'r') as config_file:
-    config = json.load(config_file)
-config = config["data_process_config"]
 
-# Load predefined ArUco dictionary
-aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, config["aruco_dict"]))
-parameters = cv2.aruco.DetectorParameters()
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / 'config' / 'config.json'
 
-def get_gripper_width(img_list):
+
+def natural_key(value: str):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', value)]
+
+
+def load_processing_config(config_path: str | os.PathLike[str]):
+    with open(config_path, 'r', encoding='utf-8') as config_file:
+        config = json.load(config_file)
+    return config['data_process_config']
+
+
+def get_aruco_components(config):
+    aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, config['aruco_dict']))
+    parameters = cv2.aruco.DetectorParameters()
+    return aruco_dict, parameters
+
+
+def get_gripper_width(image_source: Sequence, config):
     """
     Calculate gripper width from detected ArUco markers in the images.
+
+    `image_source` can be either a numpy array or an h5py dataset. Frames are
+    accessed one-by-one to avoid loading entire episodes into memory.
     """
+    aruco_dict, parameters = get_aruco_components(config)
     distances = []
     distances_index = []
     current_frame = 0
-    frame_count = len(img_list)
-    current_frame += 1
-    for i in range(img_list.shape[0]):
-        gray = cv2.cvtColor(img_list[i, :, :, :], cv2.COLOR_BGR2GRAY)
+    frame_count = len(image_source)
+    for i in range(frame_count):
+        current_frame += 1
+        frame = image_source[i]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
 
         if ids is not None:
@@ -46,6 +69,12 @@ def get_gripper_width(img_list):
                 distance = abs(gray.shape[1] / 2 - marker_centers[0][0]) * 2
                 distances.append(distance)
                 distances_index.append(current_frame)
+
+    if len(distances) == 0:
+        raise ValueError(
+            'No ArUco marker detections were found in this episode. '
+            'Check marker visibility, marker IDs, and gripper scaling calibration.'
+        )
 
     distances = np.array(distances)
     distances_index = np.array(distances_index)
@@ -92,7 +121,7 @@ def transform_to_base_quat(x, y, z, qx, qy, qz, qw, T_base_to_local):
 
 
 def normalize_and_save_base_tcp_hdf5(args):
-    input_file, output_file = args
+    input_file, output_file, config = args
     base_x, base_y, base_z = config["base_position"]["x"], config["base_position"]["y"], config["base_position"]["z"] # FastUMI TCP anchor position in the robot base frame (in meters)
     base_roll, base_pitch, base_yaw = np.deg2rad([config["base_orientation"]["roll"], config["base_orientation"]["pitch"], config["base_orientation"]["yaw"]]) # FastUMI TCP anchor orientation in the robot base frame (roll, pitch, yaw in degrees)
     rotation_base_to_local = R.from_euler('xyz', [base_roll, base_pitch, base_yaw]).as_matrix()
@@ -105,7 +134,7 @@ def normalize_and_save_base_tcp_hdf5(args):
         with h5py.File(input_file, 'r') as f_in:
             action_data = f_in['action'][:]
             qpos_data = f_in['observations/qpos'][:]
-            image_data = f_in['observations/images/front'][:]             
+            image_dataset = f_in['observations/images/front']
             normalized_qpos = np.copy(qpos_data)
 
             for i in range(normalized_qpos.shape[0]):
@@ -121,8 +150,7 @@ def normalize_and_save_base_tcp_hdf5(args):
                 x_base, y_base, z_base = pos
                 normalized_qpos[i, :] = [x_base, y_base, z_base, qx_base, qy_base, qz_base, qw_base]
 
-            image_data = np.array(image_data)
-            gripper_open_width = get_gripper_width(image_data)
+            gripper_open_width = get_gripper_width(image_dataset, config)
             gripper_open_width = gripper_open_width / config["distances"]["gripper_max"]
 
             gripper_width = gripper_open_width.reshape(-1, 1)
@@ -145,37 +173,100 @@ def normalize_and_save_base_tcp_hdf5(args):
                     compression='gzip',
                     compression_opts=4
                 )
-                images_group['front'][:] = f_in['observations/images/front'][:]
+                for frame_idx in range(max_timesteps):
+                    images_group['front'][frame_idx] = image_dataset[frame_idx]
                 observations_group.create_dataset('qpos', data=normalized_qpos_with_gripper)
                                 
                 print(f"Normalized data saved to: {output_file}")
     except Exception as e:
         print(f"Error processing {input_file}: {e}")
 
-if __name__ == "__main__":
-    input_dir = config["input_dir"]
-    output_dir = config["output_tcp_dir"]
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+def sorted_hdf5_files(input_dir: Path):
+    files = [path for path in input_dir.iterdir() if path.suffix == '.hdf5']
+    return sorted(files, key=lambda path: natural_key(path.name))
 
-    file_list = [
-        filename for filename in os.listdir(input_dir)
-        if filename.endswith('.hdf5')
-    ] 
+
+def process_single_directory(input_dir: Path, output_dir: Path, config, num_processes: int | None = None):
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    file_list = sorted_hdf5_files(input_dir)
+    if not file_list:
+        raise FileNotFoundError(f'No .hdf5 files found in {input_dir}')
+
     args_list = []
-    for filename in file_list:
-        input_file = os.path.join(input_dir, filename)
-        output_file = os.path.join(output_dir, filename)
-        args_list.append((input_file, output_file))
+    for input_file in file_list:
+        output_file = output_dir / input_file.name
+        args_list.append((str(input_file), str(output_file), config))
 
-    print("Starting parallel processing...")
+    if num_processes is None:
+        # Default to serial processing. Episodes are image-heavy, and the old
+        # cpu_count() default could easily exhaust RAM by loading many full HD
+        # episodes at once across worker processes.
+        num_processes = 1
 
-    num_processes = cpu_count()
-    with Pool(num_processes) as pool:
+    print(f'Processing {len(args_list)} episodes: {input_dir} -> {output_dir}')
+    if num_processes <= 1:
+        for task in tqdm(args_list, total=len(args_list), desc=f'Processing {input_dir.name}'):
+            normalize_and_save_base_tcp_hdf5(task)
+        return
+
+    with Pool(num_processes, maxtasksperchild=1) as pool:
         list(
-            tqdm(pool.imap_unordered(normalize_and_save_base_tcp_hdf5, args_list),
-                    total=len(args_list),
-                    desc="Processing files"))
+            tqdm(
+                pool.imap_unordered(normalize_and_save_base_tcp_hdf5, args_list, chunksize=1),
+                total=len(args_list),
+                desc=f'Processing {input_dir.name}'
+            )
+        )
 
-    print("Processing completed.")
+
+def resolve_group_jobs(args, config):
+    input_dir = Path(args.input_dir).expanduser().resolve() if args.input_dir else None
+    input_root = Path(args.input_root).expanduser().resolve() if args.input_root else None
+
+    if input_dir is not None and input_root is not None:
+        raise ValueError('Use either --input-dir or --input-root, not both.')
+
+    if input_root is not None:
+        output_root = Path(args.output_root).expanduser().resolve() if args.output_root else input_root.with_name(f'{input_root.name}_tcp')
+        group_dirs = sorted(
+            [path for path in input_root.glob(args.group_glob) if path.is_dir()],
+            key=lambda path: natural_key(path.name)
+        )
+        if not group_dirs:
+            raise FileNotFoundError(f'No group directories matching {args.group_glob!r} found in {input_root}')
+        return [(group_dir, output_root / group_dir.name) for group_dir in group_dirs]
+
+    if input_dir is None:
+        input_dir = Path(config['input_dir']).expanduser().resolve()
+
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else Path(config['output_tcp_dir']).expanduser().resolve()
+    return [(input_dir, output_dir)]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Convert FastUMI raw HDF5 episodes to TCP-space HDF5 files compatible with the downstream UMI-style Zarr conversion.'
+    )
+    parser.add_argument('--config', default=str(DEFAULT_CONFIG_PATH), help='Path to FastUMI config.json')
+    parser.add_argument('--input-dir', help='Single input directory containing episode_*.hdf5 files.')
+    parser.add_argument('--output-dir', help='Output directory for a single converted TCP group.')
+    parser.add_argument('--input-root', help='Root directory that contains multiple group subdirectories, e.g. pour_coke_v0, pour_coke_v1, ...')
+    parser.add_argument('--output-root', help='Output root for grouped conversion. Each input group is written to output-root/<group-name>.')
+    parser.add_argument('--group-glob', default='*', help='Glob used with --input-root to select group directories.')
+    parser.add_argument('--num-processes', type=int, default=None, help='Worker process count. Defaults to 1 for RAM safety. Increase only if you have headroom.')
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    config = load_processing_config(cli_args.config)
+    jobs = resolve_group_jobs(cli_args, config)
+
+    print(f'Starting TCP conversion for {len(jobs)} group(s).')
+    for input_dir, output_dir in jobs:
+        process_single_directory(input_dir, output_dir, config, num_processes=cli_args.num_processes)
+    print('Processing completed.')
