@@ -8,6 +8,7 @@ Content:
 - Creating a workspace
 - Cloning the repo
 - Uploading the dataset
+- Uploading an initialization checkpoint, if training starts from an existing model
 - Creating a Python environment
 - Submitting the job
 - Monitoring jobs
@@ -99,6 +100,8 @@ This is a convenient approach, since you only have a console view on the cluster
 
 There are 2 ways: either download a dataset using `wget` (from some online source) or push it using `rsync` from your local machine.
 
+If your training setup starts from an existing checkpoint, that checkpoint is a separate required artifact and must also be present on the cluster before the first `sbatch`.
+
 ### wget
 
 ```bash
@@ -120,11 +123,32 @@ wget -O $CAT_WS/fastumi_dp/data/dataset/fold_towel/dataset.zarr.zip \
 rsync -avh <LOCAL_DATA_DIR>/ roge097b@dataport1.hpc.tu-dresden.de:$CAT_WS/your_repo/data/<DATASET_NAME>/
 ```
 
+Important:
+
+- create the target directory on the cluster first with `mkdir -p`
+- run `rsync` from your local machine, not from inside the cluster shell
+- avoid relying on local `$USER` or `$CAT_WS` expansion unless you intentionally exported them in your local shell to the exact remote values
+
 Example:
 
 ```bash
 rsync -avh ~/datasets/fold_towel/ roge097b@dataport1.hpc.tu-dresden.de:$CAT_WS/fastumi_dp/data/dataset/fold_towel/
 ```
+
+### Uploading an initialization checkpoint
+
+If your Slurm script uses a path like `INIT_CHECKPOINT=.../latest.ckpt`, copy that file separately.
+
+Example:
+
+```bash
+ssh roge097b@login1.capella.hpc.tu-dresden.de 'mkdir -p /data/cat/ws/roge097b-fastumi/fastumi_dp/data/checkpoints/pour_water'
+rsync -avh \
+  /home/umi/fastumi_dp/data/checkpoints/pour_water/latest.ckpt \
+  roge097b@dataport1.hpc.tu-dresden.de:/data/cat/ws/roge097b-fastumi/fastumi_dp/data/checkpoints/pour_water/latest.ckpt
+```
+
+Before the first debug run, verify both the dataset and the checkpoint exist on the cluster.
 
 
 
@@ -147,7 +171,20 @@ Log in again and activate the env for a quick check:
 ```bash
 logout
 ssh -A roge097b@login1.capella.hpc.tu-dresden.de
+module load Miniconda3/25.5.1-1
+module load CMake/3.18.4
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate $CAT_WS/envs/<ENV_NAME>
+hash -r
+echo "CONDA_PREFIX=$CONDA_PREFIX"
+which python
+python -c 'import sys; print(sys.executable)'
+```
+
+If `which python` or `sys.executable` does not point to `$CAT_WS/envs/<ENV_NAME>/bin/python`, the shell is not using the intended interpreter even if the prompt looks activated. In that case, run checks through the prefix explicitly:
+
+```bash
+conda run -p $CAT_WS/envs/<ENV_NAME> python -c 'import sys; print(sys.executable)'
 ```
 
 At this point there is a chance you will run into dependency conflicts, even if the environment installed perfectly on your local machine. This is hard to cover generically - if it happens, reinstall the conflicting packages inside the conda env (just paste your conda yaml and the error text into an LLM and it will help you). For example, in our case it was:
@@ -166,6 +203,7 @@ python -c 'import torch; print(torch.__version__); print(torch.cuda.is_available
 Then check the packages that previously yielded errors:
 
 ```bash
+python -c 'import hydra, hydra.version; print(hydra.__file__); print(hydra.version.__version__)'
 python -c 'import torch; import accelerate; import timm; import wandb; print("All good!")'
 ```
 
@@ -259,7 +297,7 @@ Key differences from the original launch script:
 - included conda setup (with loading the cmake and conda modules, since they are not loaded on GPU yet, only on login node)
 - added all `#SBATCH` directives at the top - note these do **not** expand shell variables, so always use full absolute paths there. %j is the job id alias
 - `source $(conda info --base)/etc/profile.d/conda.sh` is required before `conda activate` in Slurm scripts - plain `conda activate` does not work without it
-- added `export PYTHONPATH=$CAT_WS/fastumi_dp:$PYTHONPATH` so Python can find the local `diffusion_policy` package
+- added `export PYTHONPATH=$CAT_WS/fastumi_dp:${PYTHONPATH:-}` so Python can find the local `diffusion_policy` package without failing when `PYTHONPATH` is initially unset
 - used `$CAT_WS` variable for all paths inside the script body (but not in `#SBATCH` lines)
 
 Also note that `--num_processes` must match `--gres=gpu:N`.
