@@ -260,23 +260,38 @@ which we then wrapped into an sbatch script:
 CAT_WS=/data/cat/ws/roge097b-fastumi
 module load Miniconda3/25.5.1-1
 module load CMake/3.18.4
-source $(conda info --base)/etc/profile.d/conda.sh
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate /data/cat/ws/roge097b-fastumi/envs/fastumi
-export PYTHONPATH=$CAT_WS/fastumi_dp:$PYTHONPATH
+export PYTHONPATH="$CAT_WS/fastumi_dp:${PYTHONPATH:-}"
+echo "python_executable=$(command -v python)"
+python - <<'PY'
+import importlib
+import sys
+
+required = ["hydra", "accelerate", "torch", "timm", "wandb"]
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+
+print(f"python_sys_executable={sys.executable}")
+if missing:
+  print("ERROR: missing Python modules in active conda env:", ", ".join(missing), file=sys.stderr)
+  sys.exit(1)
+
+print("env_check=ok")
+PY
 export HYDRA_FULL_ERROR=1
-cd $CAT_WS/fastumi_dp/train_scripts
+cd "$CAT_WS/fastumi_dp/train_scripts"
 
 task_name="pour_water"
 logging_time=$(date "+%d-%H.%M.%S")
 now_seconds="${logging_time: -8}"
 now_date=$(date "+%Y.%m.%d")
 run_dir="data/outputs/${now_date}/${now_seconds}"
-echo ${run_dir}
+echo "${run_dir}"
 
 accelerate launch --mixed_precision bf16 --num_processes 4 ../train.py \
 --config-name=train_diffusion_unet_timm_umi_depth_workspace \
 multi_run.run_dir=${run_dir} multi_run.wandb_name_base=${logging_time} hydra.run.dir=${run_dir} hydra.sweep.dir=${run_dir} \
-task.dataset_path=$CAT_WS/fastumi_dp/data/datasets/pour_water/dataset.zarr.zip \
+task.dataset_path="$CAT_WS/fastumi_dp/data/datasets/pour_water/dataset.zarr.zip" \
 training.num_epochs=75 \
 dataloader.batch_size=32 \
 dataloader.num_workers=8 \
@@ -289,7 +304,7 @@ task.action_down_sample_steps=3 \
 task.low_dim_obs_horizon=3 \
 task.img_obs_horizon=3 \
 training.gradient_accumulate_every=2 \
-task.dataset.cache_dir=$CAT_WS/fastumi_dp/data/cache \
+task.dataset.cache_dir="$CAT_WS/fastumi_dp/data/cache" \
 training.lr_warmup_steps=1000
 ```
 
@@ -323,23 +338,38 @@ Before launching full training, always do a short test run to catch errors early
 CAT_WS=/data/cat/ws/roge097b-fastumi
 module load Miniconda3/25.5.1-1
 module load CMake/3.18.4
-source $(conda info --base)/etc/profile.d/conda.sh
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate /data/cat/ws/roge097b-fastumi/envs/fastumi
-export PYTHONPATH=$CAT_WS/fastumi_dp:$PYTHONPATH
+export PYTHONPATH="$CAT_WS/fastumi_dp:${PYTHONPATH:-}"
+echo "python_executable=$(command -v python)"
+python - <<'PY'
+import importlib
+import sys
+
+required = ["hydra", "accelerate", "torch", "timm", "wandb"]
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+
+print(f"python_sys_executable={sys.executable}")
+if missing:
+  print("ERROR: missing Python modules in active conda env:", ", ".join(missing), file=sys.stderr)
+  sys.exit(1)
+
+print("env_check=ok")
+PY
 export HYDRA_FULL_ERROR=1
-cd $CAT_WS/fastumi_dp/train_scripts
+cd "$CAT_WS/fastumi_dp/train_scripts"
 
 task_name="pour_water"
 logging_time=$(date "+%d-%H.%M.%S")
 now_seconds="${logging_time: -8}"
 now_date=$(date "+%Y.%m.%d")
 run_dir="data/outputs/${now_date}/${now_seconds}"
-echo ${run_dir}
+echo "${run_dir}"
 
 accelerate launch --mixed_precision bf16 --num_processes 1 ../train.py \
 --config-name=train_diffusion_unet_timm_umi_depth_workspace \
 multi_run.run_dir=${run_dir} multi_run.wandb_name_base=${logging_time} hydra.run.dir=${run_dir} hydra.sweep.dir=${run_dir} \
-task.dataset_path=$CAT_WS/fastumi_dp/data/datasets/pour_water/dataset.zarr.zip \
+task.dataset_path="$CAT_WS/fastumi_dp/data/datasets/pour_water/dataset.zarr.zip" \
 training.num_epochs=2 \
 dataloader.batch_size=32 \
 dataloader.num_workers=8 \
@@ -349,7 +379,7 @@ policy.obs_encoder.model_name='vit_large_patch14_dinov2.lvd142m' \
 task.dataset.use_ratio=1.0 \
 task.obs_down_sample_steps=[3,15] \
 task.action_down_sample_steps=3 \
-task.dataset.cache_dir=$CAT_WS/fastumi_dp/data/cache \
+task.dataset.cache_dir="$CAT_WS/fastumi_dp/data/cache" \
 task.low_dim_obs_horizon=3 \
 task.img_obs_horizon=3 \
 training.debug=True

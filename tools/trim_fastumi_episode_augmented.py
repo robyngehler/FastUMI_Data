@@ -1,0 +1,981 @@
+#!/usr/bin/env python3
+"""
+Trim FastUMI-style raw episodes consistently across video, timestamps, trajectory,
+optional HDF5, and optional states.csv.
+
+This augmented version supports two workflows:
+1. Single-episode trimming (backward compatible with the original script).
+2. Batch trimming from a text plan, with optional parallel processing.
+
+Batch plan format example:
+
+    test1_run01
+    2.2-15.1
+    1.2-13.4
+    3-12.4
+
+    test1_run02
+    x
+    4.2-14.4
+    5.6-16
+
+Interpretation:
+- The first non-empty line in a block is the task directory name relative to --tasks-root.
+- Each following non-empty line maps to one episode, starting at index 0.
+- A line like "2.2-15.1" means trim that episode from 2.2s to 15.1s.
+- A line "x" means skip that episode.
+- Blank lines separate task blocks.
+- Lines starting with "#" are ignored.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+import cv2
+import h5py
+import numpy as np
+import pandas as pd
+
+
+VIDEO_TS_CANDIDATES = [
+    "csv/temp_video_timestamps_{episode}.csv",
+    "csv/video_timestamps_{episode}.csv",
+    "csv/video_timestamps_episode_{episode}.csv",
+    "csv/temp_video_timestamps.csv",  # only safe for a single-episode recording session
+]
+TRAJ_CANDIDATES = [
+    "csv/temp_trajectory_{episode}.csv",
+    "csv/trajectory_{episode}.csv",
+    "csv/trajectory_episode_{episode}.csv",
+    "csv/temp_trajectory.csv",  # only safe for a single-episode recording session
+]
+EVENT_CANDIDATES = [
+    "csv/episode_events.csv",
+]
+VIDEO_CANDIDATES = [
+    "camera/temp_video_{episode}.mp4",
+    "camera/video_{episode}.mp4",
+    "camera/episode_{episode}.mp4",
+]
+HDF5_CANDIDATES = [
+    "episode_{episode}.hdf5",
+    "episode_{episode:06d}.hdf5",
+]
+RANGE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)\s*$")
+
+
+@dataclass
+class TrimWindow:
+    label: str
+    absolute_start_ts: float
+    absolute_end_ts: float
+    relative_start_sec: float
+    relative_end_sec: float
+    duration_sec: float
+
+
+@dataclass
+class TrimResult:
+    label: str
+    out_dir: str
+    video_frames: int
+    traj_rows: int
+    downsampled_frames: int
+    has_hdf5: bool
+    has_states: bool
+    relative_start_sec: float
+    relative_end_sec: float
+
+
+@dataclass
+class BatchTaskPlan:
+    task_name: str
+    episode_specs: list[str]
+
+
+@dataclass
+class BatchEpisodeRequest:
+    task_name: str
+    task_dir: str
+    episode_index: int
+    trim_spec: str
+    skip: bool
+    start_sec: Optional[float]
+    end_sec: Optional[float]
+
+
+@dataclass
+class BatchEpisodeOutcome:
+    task_name: str
+    task_dir: str
+    episode_index: int
+    trim_spec: str
+    skip: bool
+    status: str
+    message: Optional[str]
+    summary_path: Optional[str]
+    result: Optional[dict[str, Any]]
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "Trim FastUMI-style episodes and optionally generate random start-crop augmentations. "
+            "Can also process a batch plan text file in parallel."
+        )
+    )
+
+    # Single-episode mode arguments (backward compatible).
+    p.add_argument("--task-dir", type=Path, default=None, help="FastUMI task directory, e.g. dataset/pour_water")
+    p.add_argument("--episode-index", type=int, default=None, help="Episode index to trim")
+    p.add_argument("--start-sec", type=float, default=None, help="Trim start in seconds relative to the first frame of the selected episode")
+    p.add_argument("--end-sec", type=float, default=None, help="Trim end in seconds relative to the first frame of the selected episode")
+
+    # Batch mode arguments.
+    p.add_argument("--plan-file", type=Path, default=None, help="Text file describing trims for multiple task dirs / episodes")
+    p.add_argument("--tasks-root", type=Path, default=None, help="Root directory containing the task directories referenced in --plan-file")
+    p.add_argument("--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)), help="Parallel worker processes for batch mode")
+    p.add_argument("--fail-fast", action="store_true", help="Stop batch submission on the first worker error instead of continuing")
+
+    p.add_argument(
+        "--output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Single mode: where trimmed outputs are written. Defaults to <task-dir>/trimmed. "
+            "Batch mode: optional base directory. If omitted, each task writes into <task-dir>/trimmed."
+        ),
+    )
+
+    p.add_argument("--video", type=Path, default=None, help="Override input raw video path (single mode only)")
+    p.add_argument("--video-ts", type=Path, default=None, help="Override input raw video timestamp CSV path (single mode only)")
+    p.add_argument("--trajectory", type=Path, default=None, help="Override input raw trajectory CSV path (single mode only)")
+    p.add_argument("--hdf5", type=Path, default=None, help="Optional override input HDF5 path (single mode only)")
+    p.add_argument("--states-csv", type=Path, default=None, help="Optional override states.csv path (single mode only)")
+    p.add_argument("--frame-timestamps-csv", type=Path, default=None, help="Optional override frame_timestamps.csv path (single mode only)")
+    p.add_argument("--episode-events-csv", type=Path, default=None, help="Optional override episode_events.csv path (single mode only)")
+
+    p.add_argument("--keep-absolute-timestamps", action="store_true", help="Keep original timestamps instead of rebasing to zero / first sample")
+    p.add_argument("--video-fps", type=float, default=None, help="Override output video FPS. If omitted, infer from source or timestamps")
+    p.add_argument("--codec", type=str, default="mp4v", help="OpenCV fourcc codec for trimmed mp4 output")
+    p.add_argument("--seed", type=int, default=0, help="Random seed for augmentation generation")
+
+    p.add_argument("--num-random-start-crops", type=int, default=0, help="Generate N extra variants by cropping a random amount from the beginning of the essential trimmed clip")
+    p.add_argument("--max-random-start-crop-sec", type=float, default=2.0, help="Maximum additional random crop from the beginning, in seconds")
+    p.add_argument("--min-remaining-sec", type=float, default=2.0, help="Minimum remaining clip duration after random start crop")
+
+    p.add_argument("--copy-original-manifest", action="store_true", help="Copy source file paths into the output manifest for traceability")
+    return p.parse_args()
+
+
+def resolve_candidate(task_dir: Path, episode: int, override: Optional[Path], candidates: Sequence[str], kind: str) -> Optional[Path]:
+    if override is not None:
+        if not override.exists():
+            raise FileNotFoundError(f"{kind} override does not exist: {override}")
+        return override
+    for pattern in candidates:
+        path = task_dir / pattern.format(episode=episode)
+        if path.exists():
+            return path
+    return None
+
+
+def load_csv_any(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def detect_video_fps(video_path: Path, video_ts: pd.DataFrame, override_fps: Optional[float]) -> float:
+    if override_fps is not None and override_fps > 0:
+        return float(override_fps)
+
+    cap = cv2.VideoCapture(str(video_path))
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    cap.release()
+    if fps > 1e-3:
+        return fps
+
+    if len(video_ts) >= 2:
+        dt = np.median(np.diff(video_ts["Timestamp"].astype(float).to_numpy()))
+        if dt > 0:
+            return 1.0 / dt
+    return 60.0
+
+
+def ensure_columns(df: pd.DataFrame, columns: Sequence[str], path: Path) -> None:
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns {missing} in {path}")
+
+
+def build_window(video_ts_df: pd.DataFrame, start_sec: float, end_sec: float) -> TrimWindow:
+    if end_sec <= start_sec:
+        raise ValueError("end-sec must be larger than start-sec")
+
+    ensure_columns(video_ts_df, ["Frame Index", "Timestamp"], Path("video timestamps dataframe"))
+    first_ts = float(video_ts_df["Timestamp"].iloc[0])
+    abs_start = first_ts + float(start_sec)
+    abs_end = first_ts + float(end_sec)
+    return TrimWindow(
+        label="base_trim",
+        absolute_start_ts=abs_start,
+        absolute_end_ts=abs_end,
+        relative_start_sec=float(start_sec),
+        relative_end_sec=float(end_sec),
+        duration_sec=float(end_sec - start_sec),
+    )
+
+
+def trim_video_frames(video_path: Path, out_path: Path, kept_frame_indices: np.ndarray, fps: float, codec: str) -> int:
+    if kept_frame_indices.size == 0:
+        raise ValueError("No frames selected for the trimmed clip")
+
+    start_frame = int(kept_frame_indices[0])
+    end_frame = int(kept_frame_indices[-1])
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*codec), fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Could not open output video writer for {out_path}")
+
+    keep_set = set(int(x) for x in kept_frame_indices.tolist())
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    frame_no = start_frame
+    written = 0
+
+    while frame_no <= end_frame:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_no in keep_set:
+            writer.write(frame)
+            written += 1
+        frame_no += 1
+
+    cap.release()
+    writer.release()
+
+    if written != kept_frame_indices.size:
+        raise RuntimeError(
+            f"Expected to write {kept_frame_indices.size} frames, but wrote {written}. "
+            f"This usually indicates a corrupted source video or a sparse frame index selection."
+        )
+    return written
+
+
+def write_csv(df: pd.DataFrame, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+
+
+def infer_states_group(states_df: pd.DataFrame, episode_index: int) -> pd.DataFrame:
+    ensure_columns(states_df, ["Start Time", "Frame Timestamp"], Path("states.csv dataframe"))
+    ordered_start_times: list[float] = []
+    seen = set()
+    for value in states_df["Start Time"].tolist():
+        key = float(value)
+        if key not in seen:
+            ordered_start_times.append(key)
+            seen.add(key)
+    if episode_index >= len(ordered_start_times):
+        raise IndexError(
+            f"Episode index {episode_index} exceeds the number of unique Start Time groups in states.csv ({len(ordered_start_times)})"
+        )
+    target = ordered_start_times[episode_index]
+    return states_df[np.isclose(states_df["Start Time"].astype(float).to_numpy(), target)]
+
+
+def find_episode_event(events_df: pd.DataFrame, episode_index: int) -> Optional[pd.Series]:
+    ensure_columns(
+        events_df,
+        ["Episode Index", "Recording Start Timestamp", "Recording Stop Timestamp"],
+        Path("episode_events.csv dataframe"),
+    )
+    matches = events_df[events_df["Episode Index"].astype(int) == int(episode_index)]
+    if matches.empty:
+        return None
+    return matches.iloc[-1]
+
+
+def infer_states_group_with_events(
+    states_df: pd.DataFrame,
+    episode_index: int,
+    events_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if events_df is not None:
+        event_row = find_episode_event(events_df, episode_index)
+        if event_row is not None:
+            target = float(event_row["Recording Start Timestamp"])
+            grouped = states_df[np.isclose(states_df["Start Time"].astype(float).to_numpy(), target)]
+            if not grouped.empty:
+                return grouped
+    return infer_states_group(states_df, episode_index)
+
+
+def trim_hdf5(in_hdf5: Path, out_hdf5: Path, downsampled_indices: np.ndarray) -> int:
+    if downsampled_indices.size == 0:
+        raise ValueError("No downsampled indices selected for HDF5 trimming")
+
+    with h5py.File(in_hdf5, "r") as src, h5py.File(out_hdf5, "w") as dst:
+        for key, value in src.attrs.items():
+            dst.attrs[key] = value
+
+        obs_src = src["observations"]
+        obs_dst = dst.create_group("observations")
+        img_src_grp = obs_src["images"]
+        img_dst_grp = obs_dst.create_group("images")
+        for cam_name in img_src_grp.keys():
+            img_arr = img_src_grp[cam_name][downsampled_indices]
+            img_dst_grp.create_dataset(cam_name, data=img_arr, compression="gzip", compression_opts=4)
+
+        obs_dst.create_dataset("qpos", data=obs_src["qpos"][downsampled_indices])
+        if "action" in src:
+            dst.create_dataset("action", data=src["action"][downsampled_indices])
+    return int(downsampled_indices.size)
+
+
+def maybe_ffprobe(path: Path) -> dict:
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-print_format",
+                "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(proc.stdout)
+    except Exception:
+        return {}
+
+
+def trim_once(
+    *,
+    task_dir: Path,
+    episode_index: int,
+    output_root: Path,
+    video_path: Path,
+    video_ts_path: Path,
+    traj_path: Path,
+    hdf5_path: Optional[Path],
+    states_path: Optional[Path],
+    frame_ts_path: Optional[Path],
+    episode_events_path: Optional[Path],
+    window: TrimWindow,
+    keep_absolute_timestamps: bool,
+    fps: float,
+    codec: str,
+    include_original_manifest: bool,
+) -> TrimResult:
+    out_dir = output_root / f"episode_{episode_index}_{window.label}"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    (out_dir / "camera").mkdir(parents=True, exist_ok=True)
+    (out_dir / "csv").mkdir(parents=True, exist_ok=True)
+
+    video_ts = load_csv_any(video_ts_path)
+    traj_df = load_csv_any(traj_path)
+    episode_events_df = load_csv_any(episode_events_path) if episode_events_path is not None and episode_events_path.exists() else None
+    ensure_columns(video_ts, ["Frame Index", "Timestamp"], video_ts_path)
+    ensure_columns(traj_df, ["Timestamp"], traj_path)
+
+    ts = video_ts["Timestamp"].astype(float).to_numpy()
+    keep_mask = (ts >= window.absolute_start_ts) & (ts <= window.absolute_end_ts)
+    kept_video_ts = video_ts.loc[keep_mask].copy().reset_index(drop=True)
+    if kept_video_ts.empty:
+        raise ValueError(f"Trim window {window.relative_start_sec:.3f}-{window.relative_end_sec:.3f}s selects no raw video frames")
+
+    original_frame_indices = kept_video_ts["Frame Index"].astype(int).to_numpy()
+    new_frame_indices = np.arange(len(kept_video_ts), dtype=np.int64)
+    kept_video_ts.insert(1, "Original Frame Index", original_frame_indices)
+    kept_video_ts["Frame Index"] = new_frame_indices
+
+    if keep_absolute_timestamps:
+        rebased_video_ts = kept_video_ts
+    else:
+        kept_video_ts["Timestamp"] = kept_video_ts["Timestamp"].astype(float) - window.absolute_start_ts
+        rebased_video_ts = kept_video_ts
+
+    trimmed_video_path = out_dir / "camera" / f"trimmed_episode_{episode_index}.mp4"
+    written_frames = trim_video_frames(video_path, trimmed_video_path, original_frame_indices, fps, codec)
+    write_csv(rebased_video_ts, out_dir / "csv" / "video_timestamps.csv")
+
+    traj_ts = traj_df["Timestamp"].astype(float).to_numpy()
+    traj_keep = (traj_ts >= window.absolute_start_ts) & (traj_ts <= window.absolute_end_ts)
+    trimmed_traj = traj_df.loc[traj_keep].copy().reset_index(drop=True)
+    if trimmed_traj.empty:
+        raise ValueError(f"Trim window {window.relative_start_sec:.3f}-{window.relative_end_sec:.3f}s selects no trajectory rows")
+    if not keep_absolute_timestamps:
+        trimmed_traj["Timestamp"] = trimmed_traj["Timestamp"].astype(float) - window.absolute_start_ts
+    write_csv(trimmed_traj, out_dir / "csv" / "trajectory.csv")
+
+    downsampled_source = video_ts.iloc[::3].copy().reset_index(drop=True)
+    ds_ts = downsampled_source["Timestamp"].astype(float).to_numpy()
+    ds_keep = np.where((ds_ts >= window.absolute_start_ts) & (ds_ts <= window.absolute_end_ts))[0]
+    if ds_keep.size == 0:
+        raise ValueError(
+            f"Trim window {window.relative_start_sec:.3f}-{window.relative_end_sec:.3f}s selects no 20 Hz frames. "
+            "Choose a wider window or inspect the timestamps."
+        )
+
+    trimmed_downsampled = downsampled_source.iloc[ds_keep].copy().reset_index(drop=True)
+    trimmed_downsampled.insert(1, "Original Downsampled Index", ds_keep)
+    trimmed_downsampled["Frame Index"] = np.arange(len(trimmed_downsampled), dtype=np.int64)
+    if not keep_absolute_timestamps:
+        trimmed_downsampled["Timestamp"] = trimmed_downsampled["Timestamp"].astype(float) - window.absolute_start_ts
+    write_csv(trimmed_downsampled, out_dir / "csv" / "downsampled_video_timestamps_20hz.csv")
+
+    has_hdf5 = False
+    if hdf5_path is not None and hdf5_path.exists():
+        trim_hdf5(hdf5_path, out_dir / f"episode_{episode_index}.hdf5", ds_keep)
+        has_hdf5 = True
+
+    has_states = False
+    if states_path is not None and states_path.exists():
+        states_df = load_csv_any(states_path)
+        try:
+            ep_states = infer_states_group_with_events(states_df, episode_index, episode_events_df)
+            trimmed_states = ep_states[
+                (ep_states["Frame Timestamp"].astype(float) >= window.absolute_start_ts)
+                & (ep_states["Frame Timestamp"].astype(float) <= window.absolute_end_ts)
+            ].copy().reset_index(drop=True)
+            if not trimmed_states.empty:
+                if not keep_absolute_timestamps:
+                    trimmed_states["Frame Timestamp"] = trimmed_states["Frame Timestamp"].astype(float) - window.absolute_start_ts
+                    if "Trajectory Timestamp" in trimmed_states.columns:
+                        trimmed_states["Trajectory Timestamp"] = trimmed_states["Trajectory Timestamp"].astype(float) - window.absolute_start_ts
+                write_csv(trimmed_states, out_dir / "states.csv")
+                has_states = True
+        except Exception as exc:
+            warning_path = out_dir / "states_trim_warning.txt"
+            episode_events_hint = (
+                "episode_events.csv was not available or did not contain a matching episode row.\n"
+                if episode_events_df is None or find_episode_event(episode_events_df, episode_index) is None
+                else ""
+            )
+            warning_path.write_text(
+                "Could not trim states.csv reliably.\n"
+                f"Reason: {exc}\n"
+                + episode_events_hint
+                + "states.csv does not store an explicit episode id,\n"
+                + "so grouping falls back to Start Time matching when needed.\n"
+            )
+
+    if episode_events_df is not None:
+        event_row = find_episode_event(episode_events_df, episode_index)
+        if event_row is not None:
+            write_csv(pd.DataFrame([event_row]), out_dir / "csv" / "episode_events.csv")
+
+    manifest = {
+        "task_dir": str(task_dir),
+        "episode_index": episode_index,
+        "window": asdict(window),
+        "source_video_fps": fps,
+        "codec": codec,
+        "output_video_ffprobe": maybe_ffprobe(trimmed_video_path),
+        "notes": [
+            "Relative trim times are interpreted relative to the first frame timestamp of the selected episode.",
+            "The HDF5 trim uses the FastUMI baseline rule of selecting every third raw video frame to form the 20 Hz stream.",
+        ],
+    }
+    if include_original_manifest:
+        manifest["sources"] = {
+            "video": str(video_path),
+            "video_timestamps": str(video_ts_path),
+            "trajectory_csv": str(traj_path),
+            "hdf5": str(hdf5_path) if hdf5_path else None,
+            "states_csv": str(states_path) if states_path else None,
+            "frame_timestamps_csv": str(frame_ts_path) if frame_ts_path else None,
+            "episode_events_csv": str(episode_events_path) if episode_events_path else None,
+        }
+    (out_dir / "trim_manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    return TrimResult(
+        label=window.label,
+        out_dir=str(out_dir),
+        video_frames=written_frames,
+        traj_rows=len(trimmed_traj),
+        downsampled_frames=len(trimmed_downsampled),
+        has_hdf5=has_hdf5,
+        has_states=has_states,
+        relative_start_sec=window.relative_start_sec,
+        relative_end_sec=window.relative_end_sec,
+    )
+
+
+def build_augmented_windows(base: TrimWindow, num: int, max_crop_sec: float, min_remaining_sec: float, seed: int) -> list[TrimWindow]:
+    rng = random.Random(seed)
+    windows: list[TrimWindow] = []
+    for i in range(num):
+        max_allowed = min(max_crop_sec, max(0.0, base.duration_sec - min_remaining_sec))
+        if max_allowed <= 0:
+            break
+        delta = rng.uniform(0.0, max_allowed)
+        start_rel = base.relative_start_sec + delta
+        end_rel = base.relative_end_sec
+        windows.append(
+            TrimWindow(
+                label=f"aug_startcrop_{i+1:02d}",
+                absolute_start_ts=base.absolute_start_ts + delta,
+                absolute_end_ts=base.absolute_end_ts,
+                relative_start_sec=start_rel,
+                relative_end_sec=end_rel,
+                duration_sec=end_rel - start_rel,
+            )
+        )
+    return windows
+
+
+def parse_trim_spec(spec: str) -> tuple[bool, Optional[float], Optional[float]]:
+    raw = spec.strip()
+    if not raw:
+        raise ValueError("Empty trim specification")
+    if raw.lower() == "x":
+        return True, None, None
+    match = RANGE_RE.match(raw)
+    if not match:
+        raise ValueError(f"Invalid trim spec '{spec}'. Expected 'start-end' or 'x'.")
+    start_sec = float(match.group(1))
+    end_sec = float(match.group(2))
+    if end_sec <= start_sec:
+        raise ValueError(f"Invalid trim spec '{spec}': end must be larger than start.")
+    return False, start_sec, end_sec
+
+
+def parse_plan_file(plan_file: Path) -> list[BatchTaskPlan]:
+    if not plan_file.exists():
+        raise FileNotFoundError(f"Plan file does not exist: {plan_file}")
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for raw_line in plan_file.read_text().splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        if line.startswith("#"):
+            continue
+        current.append(line)
+    if current:
+        blocks.append(current)
+
+    plans: list[BatchTaskPlan] = []
+    for idx, block in enumerate(blocks):
+        if len(block) < 2:
+            raise ValueError(
+                f"Invalid block #{idx + 1} in {plan_file}: each block needs a task name plus at least one trim spec line"
+            )
+        task_name = block[0]
+        episode_specs = block[1:]
+        for spec in episode_specs:
+            parse_trim_spec(spec)  # validate early
+        plans.append(BatchTaskPlan(task_name=task_name, episode_specs=episode_specs))
+    if not plans:
+        raise ValueError(f"No valid task blocks found in {plan_file}")
+    return plans
+
+
+def build_batch_requests(tasks_root: Path, plans: list[BatchTaskPlan]) -> list[BatchEpisodeRequest]:
+    requests: list[BatchEpisodeRequest] = []
+    for plan in plans:
+        task_dir = (tasks_root / plan.task_name).resolve()
+        for episode_index, spec in enumerate(plan.episode_specs):
+            skip, start_sec, end_sec = parse_trim_spec(spec)
+            requests.append(
+                BatchEpisodeRequest(
+                    task_name=plan.task_name,
+                    task_dir=str(task_dir),
+                    episode_index=episode_index,
+                    trim_spec=spec,
+                    skip=skip,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                )
+            )
+    return requests
+
+
+def auto_detect_inputs(task_dir: Path, episode_index: int) -> dict[str, Optional[Path]]:
+    video_path = resolve_candidate(task_dir, episode_index, None, VIDEO_CANDIDATES, "video")
+    video_ts_path = resolve_candidate(task_dir, episode_index, None, VIDEO_TS_CANDIDATES, "video timestamps")
+    traj_path = resolve_candidate(task_dir, episode_index, None, TRAJ_CANDIDATES, "trajectory CSV")
+    hdf5_path = resolve_candidate(task_dir, episode_index, None, HDF5_CANDIDATES, "HDF5")
+    states_path = task_dir / "states.csv" if (task_dir / "states.csv").exists() else None
+    frame_ts_path = task_dir / "csv" / "frame_timestamps.csv" if (task_dir / "csv" / "frame_timestamps.csv").exists() else None
+    episode_events_path = resolve_candidate(task_dir, episode_index, None, EVENT_CANDIDATES, "episode events CSV")
+
+    if video_path is None:
+        raise FileNotFoundError(f"Could not auto-detect raw video path for {task_dir}, episode {episode_index}")
+    if video_ts_path is None:
+        raise FileNotFoundError(
+            f"Could not auto-detect raw video timestamp CSV for {task_dir}, episode {episode_index}. "
+            "Expected a per-episode file such as csv/temp_video_timestamps_<episode>.csv."
+        )
+    if traj_path is None:
+        raise FileNotFoundError(
+            f"Could not auto-detect raw trajectory CSV for {task_dir}, episode {episode_index}. "
+            "Expected a per-episode file such as csv/temp_trajectory_<episode>.csv."
+        )
+
+    return {
+        "video_path": video_path,
+        "video_ts_path": video_ts_path,
+        "traj_path": traj_path,
+        "hdf5_path": hdf5_path,
+        "states_path": states_path,
+        "frame_ts_path": frame_ts_path,
+        "episode_events_path": episode_events_path,
+    }
+
+
+def run_single_trim(
+    *,
+    task_dir: Path,
+    episode_index: int,
+    start_sec: float,
+    end_sec: float,
+    output_root: Optional[Path],
+    video: Optional[Path],
+    video_ts: Optional[Path],
+    trajectory: Optional[Path],
+    hdf5: Optional[Path],
+    states_csv: Optional[Path],
+    frame_timestamps_csv: Optional[Path],
+    episode_events_csv: Optional[Path],
+    keep_absolute_timestamps: bool,
+    video_fps: Optional[float],
+    codec: str,
+    seed: int,
+    num_random_start_crops: int,
+    max_random_start_crop_sec: float,
+    min_remaining_sec: float,
+    copy_original_manifest: bool,
+) -> dict[str, Any]:
+    task_dir = task_dir.resolve()
+    if not task_dir.exists():
+        raise FileNotFoundError(f"Task directory does not exist: {task_dir}")
+
+    video_path = resolve_candidate(task_dir, episode_index, video, VIDEO_CANDIDATES, "video")
+    video_ts_path = resolve_candidate(task_dir, episode_index, video_ts, VIDEO_TS_CANDIDATES, "video timestamps")
+    traj_path = resolve_candidate(task_dir, episode_index, trajectory, TRAJ_CANDIDATES, "trajectory CSV")
+    hdf5_path = resolve_candidate(task_dir, episode_index, hdf5, HDF5_CANDIDATES, "HDF5")
+    states_path = states_csv if states_csv else (task_dir / "states.csv" if (task_dir / "states.csv").exists() else None)
+    frame_ts_path = frame_timestamps_csv if frame_timestamps_csv else (task_dir / "csv" / "frame_timestamps.csv" if (task_dir / "csv" / "frame_timestamps.csv").exists() else None)
+    episode_events_path = resolve_candidate(task_dir, episode_index, episode_events_csv, EVENT_CANDIDATES, "episode events CSV")
+
+    if video_path is None:
+        raise FileNotFoundError("Could not auto-detect raw video path. Provide --video explicitly.")
+    if video_ts_path is None:
+        raise FileNotFoundError(
+            "Could not auto-detect raw video timestamp CSV. Provide --video-ts explicitly. "
+            "Expected a per-episode file such as csv/temp_video_timestamps_<episode>.csv."
+        )
+    if traj_path is None:
+        raise FileNotFoundError(
+            "Could not auto-detect raw trajectory CSV. Provide --trajectory explicitly. "
+            "Expected a per-episode file such as csv/temp_trajectory_<episode>.csv."
+        )
+
+    video_ts_df = load_csv_any(video_ts_path)
+    ensure_columns(video_ts_df, ["Frame Index", "Timestamp"], video_ts_path)
+    base_window = build_window(video_ts_df, start_sec, end_sec)
+    fps = detect_video_fps(video_path, video_ts_df, video_fps)
+    final_output_root = (output_root or (task_dir / "trimmed")).resolve()
+    final_output_root.mkdir(parents=True, exist_ok=True)
+
+    windows = [base_window] + build_augmented_windows(
+        base_window,
+        num_random_start_crops,
+        max_random_start_crop_sec,
+        min_remaining_sec,
+        seed,
+    )
+
+    results: list[TrimResult] = []
+    for window in windows:
+        result = trim_once(
+            task_dir=task_dir,
+            episode_index=episode_index,
+            output_root=final_output_root,
+            video_path=video_path,
+            video_ts_path=video_ts_path,
+            traj_path=traj_path,
+            hdf5_path=hdf5_path,
+            states_path=states_path,
+            frame_ts_path=frame_ts_path,
+            episode_events_path=episode_events_path,
+            window=window,
+            keep_absolute_timestamps=keep_absolute_timestamps,
+            fps=fps,
+            codec=codec,
+            include_original_manifest=copy_original_manifest,
+        )
+        results.append(result)
+
+    summary = {
+        "task_dir": str(task_dir),
+        "episode_index": episode_index,
+        "input_files": {
+            "video": str(video_path),
+            "video_timestamps": str(video_ts_path),
+            "trajectory": str(traj_path),
+            "hdf5": str(hdf5_path) if hdf5_path else None,
+            "states_csv": str(states_path) if states_path else None,
+            "frame_timestamps_csv": str(frame_ts_path) if frame_ts_path else None,
+            "episode_events_csv": str(episode_events_path) if episode_events_path else None,
+        },
+        "results": [asdict(r) for r in results],
+        "recommendations": [
+            "Use the base trim for your essential episode window.",
+            "Only use random start-crop augmentations when the first cropped-away seconds are not themselves the core of the task.",
+            "Prefer episode_events.csv when correlating trims back to Enter-triggered tracking and recording boundaries.",
+        ],
+    }
+    (final_output_root / f"episode_{episode_index}_trim_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary
+
+
+def process_batch_episode(payload: dict[str, Any]) -> dict[str, Any]:
+    request = BatchEpisodeRequest(**payload["request"])
+    output_root_base = Path(payload["output_root_base"]).resolve() if payload["output_root_base"] is not None else None
+    keep_absolute_timestamps = bool(payload["keep_absolute_timestamps"])
+    video_fps = payload["video_fps"]
+    codec = str(payload["codec"])
+    seed = int(payload["seed"])
+    num_random_start_crops = int(payload["num_random_start_crops"])
+    max_random_start_crop_sec = float(payload["max_random_start_crop_sec"])
+    min_remaining_sec = float(payload["min_remaining_sec"])
+    copy_original_manifest = bool(payload["copy_original_manifest"])
+
+    if request.skip:
+        return asdict(
+            BatchEpisodeOutcome(
+                task_name=request.task_name,
+                task_dir=request.task_dir,
+                episode_index=request.episode_index,
+                trim_spec=request.trim_spec,
+                skip=True,
+                status="skipped",
+                message="Skipped because trim spec is 'x'.",
+                summary_path=None,
+                result=None,
+            )
+        )
+
+    task_dir = Path(request.task_dir).resolve()
+    if output_root_base is None:
+        output_root = task_dir / "trimmed"
+    else:
+        output_root = output_root_base / request.task_name
+    try:
+        summary = run_single_trim(
+            task_dir=task_dir,
+            episode_index=request.episode_index,
+            start_sec=float(request.start_sec),
+            end_sec=float(request.end_sec),
+            output_root=output_root,
+            video=None,
+            video_ts=None,
+            trajectory=None,
+            hdf5=None,
+            states_csv=None,
+            frame_timestamps_csv=None,
+            episode_events_csv=None,
+            keep_absolute_timestamps=keep_absolute_timestamps,
+            video_fps=video_fps,
+            codec=codec,
+            seed=seed,
+            num_random_start_crops=num_random_start_crops,
+            max_random_start_crop_sec=max_random_start_crop_sec,
+            min_remaining_sec=min_remaining_sec,
+            copy_original_manifest=copy_original_manifest,
+        )
+        summary_path = str(output_root / f"episode_{request.episode_index}_trim_summary.json")
+        return asdict(
+            BatchEpisodeOutcome(
+                task_name=request.task_name,
+                task_dir=request.task_dir,
+                episode_index=request.episode_index,
+                trim_spec=request.trim_spec,
+                skip=False,
+                status="ok",
+                message=None,
+                summary_path=summary_path,
+                result=summary,
+            )
+        )
+    except Exception as exc:
+        return asdict(
+            BatchEpisodeOutcome(
+                task_name=request.task_name,
+                task_dir=request.task_dir,
+                episode_index=request.episode_index,
+                trim_spec=request.trim_spec,
+                skip=False,
+                status="error",
+                message=str(exc),
+                summary_path=None,
+                result=None,
+            )
+        )
+
+
+def run_batch(args: argparse.Namespace) -> dict[str, Any]:
+    if args.tasks_root is None:
+        raise ValueError("Batch mode requires --tasks-root")
+    if any(value is not None for value in [args.video, args.video_ts, args.trajectory, args.hdf5, args.states_csv, args.frame_timestamps_csv, args.episode_events_csv]):
+        raise ValueError("Batch mode does not support per-episode input override flags like --video or --trajectory")
+
+    tasks_root = args.tasks_root.resolve()
+    if not tasks_root.exists():
+        raise FileNotFoundError(f"Tasks root does not exist: {tasks_root}")
+
+    plans = parse_plan_file(args.plan_file.resolve())
+    requests = build_batch_requests(tasks_root, plans)
+    output_root_base = args.output_root.resolve() if args.output_root is not None else None
+    if output_root_base is not None:
+        output_root_base.mkdir(parents=True, exist_ok=True)
+
+    submitted = len(requests)
+    jobs = max(1, int(args.jobs))
+    payloads = [
+        {
+            "request": asdict(req),
+            "output_root_base": str(output_root_base) if output_root_base is not None else None,
+            "keep_absolute_timestamps": args.keep_absolute_timestamps,
+            "video_fps": args.video_fps,
+            "codec": args.codec,
+            "seed": args.seed,
+            "num_random_start_crops": args.num_random_start_crops,
+            "max_random_start_crop_sec": args.max_random_start_crop_sec,
+            "min_remaining_sec": args.min_remaining_sec,
+            "copy_original_manifest": args.copy_original_manifest,
+        }
+        for req in requests
+    ]
+
+    outcomes: list[dict[str, Any]] = []
+    if jobs == 1:
+        for payload in payloads:
+            outcome = process_batch_episode(payload)
+            outcomes.append(outcome)
+            if args.fail_fast and outcome["status"] == "error":
+                break
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            futures = [executor.submit(process_batch_episode, payload) for payload in payloads]
+            for future in as_completed(futures):
+                outcome = future.result()
+                outcomes.append(outcome)
+                if args.fail_fast and outcome["status"] == "error":
+                    for f in futures:
+                        f.cancel()
+                    break
+
+    outcomes.sort(key=lambda item: (item["task_name"], item["episode_index"]))
+    num_ok = sum(1 for item in outcomes if item["status"] == "ok")
+    num_skipped = sum(1 for item in outcomes if item["status"] == "skipped")
+    num_error = sum(1 for item in outcomes if item["status"] == "error")
+
+    summary = {
+        "plan_file": str(args.plan_file.resolve()),
+        "tasks_root": str(tasks_root),
+        "output_root_base": str(output_root_base) if output_root_base is not None else None,
+        "submitted": submitted,
+        "jobs": jobs,
+        "num_ok": num_ok,
+        "num_skipped": num_skipped,
+        "num_error": num_error,
+        "results": outcomes,
+        "notes": [
+            "Each task block maps trim lines to episode indices starting at 0.",
+            "A trim spec 'x' means that episode is skipped.",
+            "If --output-root is omitted in batch mode, results are written to <task-dir>/trimmed.",
+        ],
+    }
+
+    summary_path = (output_root_base / "trim_batch_summary.json") if output_root_base is not None else (tasks_root / "trim_batch_summary.json")
+    summary_path.write_text(json.dumps(summary, indent=2))
+    summary["summary_path"] = str(summary_path)
+    return summary
+
+
+def validate_mode(args: argparse.Namespace) -> str:
+    single_fields = [args.task_dir, args.episode_index, args.start_sec, args.end_sec]
+    single_mode = all(value is not None for value in single_fields)
+    batch_mode = args.plan_file is not None
+
+    if single_mode and batch_mode:
+        raise ValueError("Choose either single-episode mode or batch mode, not both.")
+    if not single_mode and not batch_mode:
+        raise ValueError(
+            "Provide either --task-dir/--episode-index/--start-sec/--end-sec for single mode, "
+            "or --plan-file/--tasks-root for batch mode."
+        )
+    if batch_mode:
+        return "batch"
+    return "single"
+
+
+def main() -> None:
+    args = parse_args()
+    mode = validate_mode(args)
+    if mode == "batch":
+        summary = run_batch(args)
+        print(json.dumps(summary, indent=2))
+        return
+
+    summary = run_single_trim(
+        task_dir=args.task_dir,
+        episode_index=int(args.episode_index),
+        start_sec=float(args.start_sec),
+        end_sec=float(args.end_sec),
+        output_root=args.output_root,
+        video=args.video,
+        video_ts=args.video_ts,
+        trajectory=args.trajectory,
+        hdf5=args.hdf5,
+        states_csv=args.states_csv,
+        frame_timestamps_csv=args.frame_timestamps_csv,
+        episode_events_csv=args.episode_events_csv,
+        keep_absolute_timestamps=args.keep_absolute_timestamps,
+        video_fps=args.video_fps,
+        codec=args.codec,
+        seed=args.seed,
+        num_random_start_crops=args.num_random_start_crops,
+        max_random_start_crop_sec=args.max_random_start_crop_sec,
+        min_remaining_sec=args.min_remaining_sec,
+        copy_original_manifest=args.copy_original_manifest,
+    )
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()
