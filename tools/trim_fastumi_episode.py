@@ -6,9 +6,10 @@ randomly cropping the first part of an already-trimmed essential episode.
 
 Assumptions / intended use:
 - Raw video is stored per episode, e.g. camera/temp_video_<idx>.mp4.
-- Per-episode raw video timestamps and raw trajectory CSVs are available. The public
-  FastUMI recorder only keeps temp CSV paths by default, so for multiple episodes you
-  should archive/copy those files per episode during recording.
+- Per-episode raw video timestamps and raw trajectory CSVs are available, ideally as
+    csv/temp_video_timestamps_<idx>.csv and csv/temp_trajectory_<idx>.csv.
+- episode_events.csv is optional but recommended because it records the Enter-triggered
+    tracking/recording boundaries per episode and improves states.csv correlation.
 - Relative trim times are given in seconds relative to the first video frame of the
   selected episode, matching what a normal video player shows.
 
@@ -46,6 +47,9 @@ TRAJ_CANDIDATES = [
     "csv/trajectory_{episode}.csv",
     "csv/trajectory_episode_{episode}.csv",
     "csv/temp_trajectory.csv",  # only safe for a single-episode recording session
+]
+EVENT_CANDIDATES = [
+    "csv/episode_events.csv",
 ]
 VIDEO_CANDIDATES = [
     "camera/temp_video_{episode}.mp4",
@@ -95,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hdf5", type=Path, default=None, help="Optional override input HDF5 path")
     p.add_argument("--states-csv", type=Path, default=None, help="Optional override states.csv path")
     p.add_argument("--frame-timestamps-csv", type=Path, default=None, help="Optional override frame_timestamps.csv path")
+    p.add_argument("--episode-events-csv", type=Path, default=None, help="Optional override episode_events.csv path")
 
     p.add_argument("--keep-absolute-timestamps", action="store_true", help="Keep original timestamps instead of rebasing to zero / first sample")
     p.add_argument("--video-fps", type=float, default=None, help="Override output video FPS. If omitted, infer from source or timestamps")
@@ -234,6 +239,33 @@ def infer_states_group(states_df: pd.DataFrame, episode_index: int) -> pd.DataFr
     return states_df[np.isclose(states_df["Start Time"].astype(float).to_numpy(), target)]
 
 
+def find_episode_event(events_df: pd.DataFrame, episode_index: int) -> Optional[pd.Series]:
+    ensure_columns(
+        events_df,
+        ["Episode Index", "Recording Start Timestamp", "Recording Stop Timestamp"],
+        Path("episode_events.csv dataframe"),
+    )
+    matches = events_df[events_df["Episode Index"].astype(int) == int(episode_index)]
+    if matches.empty:
+        return None
+    return matches.iloc[-1]
+
+
+def infer_states_group_with_events(
+    states_df: pd.DataFrame,
+    episode_index: int,
+    events_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if events_df is not None:
+        event_row = find_episode_event(events_df, episode_index)
+        if event_row is not None:
+            target = float(event_row["Recording Start Timestamp"])
+            grouped = states_df[np.isclose(states_df["Start Time"].astype(float).to_numpy(), target)]
+            if not grouped.empty:
+                return grouped
+    return infer_states_group(states_df, episode_index)
+
+
 def trim_hdf5(in_hdf5: Path, out_hdf5: Path, downsampled_indices: np.ndarray) -> int:
     if downsampled_indices.size == 0:
         raise ValueError("No downsampled indices selected for HDF5 trimming")
@@ -291,6 +323,7 @@ def trim_once(
     hdf5_path: Optional[Path],
     states_path: Optional[Path],
     frame_ts_path: Optional[Path],
+    episode_events_path: Optional[Path],
     window: TrimWindow,
     keep_absolute_timestamps: bool,
     fps: float,
@@ -305,6 +338,7 @@ def trim_once(
 
     video_ts = load_csv_any(video_ts_path)
     traj_df = load_csv_any(traj_path)
+    episode_events_df = load_csv_any(episode_events_path) if episode_events_path is not None and episode_events_path.exists() else None
     ensure_columns(video_ts, ["Frame Index", "Timestamp"], video_ts_path)
     ensure_columns(traj_df, ["Timestamp"], traj_path)
 
@@ -366,7 +400,7 @@ def trim_once(
     if states_path is not None and states_path.exists():
         states_df = load_csv_any(states_path)
         try:
-            ep_states = infer_states_group(states_df, episode_index)
+            ep_states = infer_states_group_with_events(states_df, episode_index, episode_events_df)
             trimmed_states = ep_states[
                 (ep_states["Frame Timestamp"].astype(float) >= window.absolute_start_ts)
                 & (ep_states["Frame Timestamp"].astype(float) <= window.absolute_end_ts)
@@ -380,12 +414,23 @@ def trim_once(
                 has_states = True
         except Exception as exc:
             warning_path = out_dir / "states_trim_warning.txt"
+            episode_events_hint = (
+                "episode_events.csv was not available or did not contain a matching episode row.\n"
+                if episode_events_df is None or find_episode_event(episode_events_df, episode_index) is None
+                else ""
+            )
             warning_path.write_text(
                 "Could not trim states.csv reliably.\n"
                 f"Reason: {exc}\n"
-                "The public FastUMI recorder does not store an explicit episode id in states.csv,\n"
-                "so grouping has to be inferred from Start Time.\n"
+                + episode_events_hint +
+                "states.csv does not store an explicit episode id,\n"
+                "so grouping falls back to Start Time matching when needed.\n"
             )
+
+    if episode_events_df is not None:
+        event_row = find_episode_event(episode_events_df, episode_index)
+        if event_row is not None:
+            write_csv(pd.DataFrame([event_row]), out_dir / "csv" / "episode_events.csv")
 
     # Persist manifest.
     manifest = {
@@ -408,6 +453,7 @@ def trim_once(
             "hdf5": str(hdf5_path) if hdf5_path else None,
             "states_csv": str(states_path) if states_path else None,
             "frame_timestamps_csv": str(frame_ts_path) if frame_ts_path else None,
+            "episode_events_csv": str(episode_events_path) if episode_events_path else None,
         }
     (out_dir / "trim_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -460,20 +506,19 @@ def main() -> None:
     hdf5_path = resolve_candidate(task_dir, args.episode_index, args.hdf5, HDF5_CANDIDATES, "HDF5")
     states_path = args.states_csv if args.states_csv else (task_dir / "states.csv" if (task_dir / "states.csv").exists() else None)
     frame_ts_path = args.frame_timestamps_csv if args.frame_timestamps_csv else (task_dir / "csv" / "frame_timestamps.csv" if (task_dir / "csv" / "frame_timestamps.csv").exists() else None)
+    episode_events_path = resolve_candidate(task_dir, args.episode_index, args.episode_events_csv, EVENT_CANDIDATES, "episode events CSV")
 
     if video_path is None:
         raise FileNotFoundError("Could not auto-detect raw video path. Provide --video explicitly.")
     if video_ts_path is None:
         raise FileNotFoundError(
             "Could not auto-detect raw video timestamp CSV. Provide --video-ts explicitly. "
-            "Note: the public FastUMI recorder only keeps temp_video_timestamps.csv by default. "
-            "For multi-episode post-trimming you should archive that file per episode during collection."
+            "Expected a per-episode file such as csv/temp_video_timestamps_<episode>.csv."
         )
     if traj_path is None:
         raise FileNotFoundError(
             "Could not auto-detect raw trajectory CSV. Provide --trajectory explicitly. "
-            "Note: the public FastUMI recorder only keeps temp_trajectory.csv by default. "
-            "For multi-episode post-trimming you should archive that file per episode during collection."
+            "Expected a per-episode file such as csv/temp_trajectory_<episode>.csv."
         )
 
     video_ts_df = load_csv_any(video_ts_path)
@@ -503,6 +548,7 @@ def main() -> None:
             hdf5_path=hdf5_path,
             states_path=states_path,
             frame_ts_path=frame_ts_path,
+            episode_events_path=episode_events_path,
             window=window,
             keep_absolute_timestamps=args.keep_absolute_timestamps,
             fps=fps,
@@ -521,12 +567,13 @@ def main() -> None:
             "hdf5": str(hdf5_path) if hdf5_path else None,
             "states_csv": str(states_path) if states_path else None,
             "frame_timestamps_csv": str(frame_ts_path) if frame_ts_path else None,
+            "episode_events_csv": str(episode_events_path) if episode_events_path else None,
         },
         "results": [asdict(r) for r in results],
         "recommendations": [
             "Use the base trim for your essential episode window.",
             "Only use random start-crop augmentations when the first cropped-away seconds are not themselves the core of the task.",
-            "For multi-episode recording sessions, archive raw trajectory and video timestamp CSVs per episode; the public FastUMI temp filenames are otherwise overwritten.",
+            "Prefer episode_events.csv when correlating trims back to Enter-triggered tracking and recording boundaries.",
         ],
     }
     (output_root / f"episode_{args.episode_index}_trim_summary.json").write_text(json.dumps(summary, indent=2))
