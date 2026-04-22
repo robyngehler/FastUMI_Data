@@ -790,3 +790,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+"""
+python trim_fastumi_episode_patched.py \
+  --tasks-root ../dataset \
+  --task-prefix test2_run \
+  --auto-from-events \
+  --jobs 8
+"""
