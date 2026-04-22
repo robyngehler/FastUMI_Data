@@ -3,9 +3,16 @@
 Trim FastUMI-style raw episodes consistently across video, timestamps, trajectory,
 optional HDF5, and optional states.csv.
 
-Adapted for both old and new data layouts:
-- prefers episode_events.csv + per-episode files when available
-- falls back to old shared temp_* streams only when necessary
+Supports:
+- Single-episode manual trim with --start-sec/--end-sec
+- Single-episode automatic extraction with --auto-from-events
+- Batch trim from a plan file
+- Batch automatic extraction from all matching task dirs with --auto-from-events
+
+Data handling priority:
+1. Prefer episode_events.csv for per-episode file resolution and recording bounds
+2. Prefer per-episode CSVs such as temp_video_timestamps_<episode>.csv and temp_trajectory_<episode>.csv
+3. Fall back to shared temp_* streams only when necessary
 """
 from __future__ import annotations
 
@@ -91,6 +98,7 @@ class BatchEpisodeRequest:
     skip: bool
     start_sec: Optional[float]
     end_sec: Optional[float]
+    auto_from_events: bool = False
 
 
 @dataclass
@@ -112,10 +120,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--episode-index", type=int, default=None)
     p.add_argument("--start-sec", type=float, default=None)
     p.add_argument("--end-sec", type=float, default=None)
+
     p.add_argument("--plan-file", type=Path, default=None)
     p.add_argument("--tasks-root", type=Path, default=None)
+    p.add_argument("--task-glob", type=str, default="*", help='Glob pattern for auto batch mode, e.g. "test2_run*"')
     p.add_argument("--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)))
     p.add_argument("--fail-fast", action="store_true")
+
+    p.add_argument(
+        "--auto-from-events",
+        action="store_true",
+        help="If start/end are omitted, use the full relevant episode window from episode_events.csv or the local episode CSVs.",
+    )
+
     p.add_argument("--output-root", type=Path, default=None)
     p.add_argument("--video", type=Path, default=None)
     p.add_argument("--video-ts", type=Path, default=None)
@@ -363,21 +380,26 @@ def build_window(video_ts_df: pd.DataFrame, start_sec: float, end_sec: float) ->
 def trim_video_frames(video_path: Path, out_path: Path, kept_frame_indices: np.ndarray, fps: float, codec: str) -> int:
     if kept_frame_indices.size == 0:
         raise ValueError("No frames selected for the trimmed clip")
+
     start_frame = int(kept_frame_indices[0])
     end_frame = int(kept_frame_indices[-1])
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*codec), fps, (width, height))
     if not writer.isOpened():
         cap.release()
         raise RuntimeError(f"Could not open output video writer for {out_path}")
+
     keep_set = set(int(x) for x in kept_frame_indices.tolist())
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     frame_no = start_frame
     written = 0
+
     while frame_no <= end_frame:
         ret, frame = cap.read()
         if not ret:
@@ -386,16 +408,41 @@ def trim_video_frames(video_path: Path, out_path: Path, kept_frame_indices: np.n
             writer.write(frame)
             written += 1
         frame_no += 1
+
     cap.release()
     writer.release()
+
     if written != kept_frame_indices.size:
-        raise RuntimeError(f"Expected to write {kept_frame_indices.size} frames, but wrote {written}.")
+        raise RuntimeError(
+            f"Expected to write {kept_frame_indices.size} frames, but wrote {written}. "
+            f"This usually indicates a corrupted source video or a sparse frame index selection."
+        )
     return written
 
 
 def write_csv(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
+
+
+def infer_full_window_from_events_or_stream(*, video_ts_df: pd.DataFrame, episode_events_df: Optional[pd.DataFrame], episode_index: int) -> tuple[float, float, list[str]]:
+    notes: list[str] = []
+    if episode_events_df is not None:
+        event_row = find_episode_event(episode_events_df, episode_index)
+        if event_row is not None:
+            start_abs = float(event_row["Recording Start Timestamp"])
+            stop_abs = float(event_row["Recording Stop Timestamp"])
+            first_ts = float(video_ts_df["Timestamp"].iloc[0])
+            start_sec = max(0.0, start_abs - first_ts)
+            end_sec = max(start_sec, stop_abs - first_ts)
+            notes.append("Full trim window inferred from episode_events.csv.")
+            return start_sec, end_sec, notes
+    ts = video_ts_df["Timestamp"].astype(float).to_numpy()
+    first_ts = float(ts[0])
+    start_sec = 0.0
+    end_sec = float(ts[-1] - first_ts)
+    notes.append("Full trim window inferred from local episode timestamp CSV.")
+    return start_sec, end_sec, notes
 
 
 def infer_states_group(states_df: pd.DataFrame, episode_index: int) -> pd.DataFrame:
@@ -610,7 +657,30 @@ def build_batch_requests(tasks_root: Path, plans: list[BatchTaskPlan]) -> list[B
         task_dir = (tasks_root / plan.task_name).resolve()
         for episode_index, spec in enumerate(plan.episode_specs):
             skip, start_sec, end_sec = parse_trim_spec(spec)
-            requests.append(BatchEpisodeRequest(plan.task_name, str(task_dir), episode_index, spec, skip, start_sec, end_sec))
+            requests.append(BatchEpisodeRequest(plan.task_name, str(task_dir), episode_index, spec, skip, start_sec, end_sec, False))
+    return requests
+
+
+def build_auto_requests(tasks_root: Path, task_glob: str) -> list[BatchEpisodeRequest]:
+    requests: list[BatchEpisodeRequest] = []
+    for task_dir in sorted([p for p in tasks_root.glob(task_glob) if p.is_dir()]):
+        task_name = task_dir.name
+        episode_events_path = resolve_candidate(task_dir, 0, None, EVENT_CANDIDATES, "episode events CSV")
+        if episode_events_path is not None and episode_events_path.exists():
+            events_df = load_csv_any(episode_events_path)
+            ensure_columns(events_df, ["Episode Index"], episode_events_path)
+            episode_indices = sorted(events_df["Episode Index"].astype(int).unique().tolist())
+        else:
+            episode_indices = []
+            for i in range(16):
+                try:
+                    auto = auto_detect_inputs(task_dir, i, None)
+                    if auto["video_path"] is not None:
+                        episode_indices.append(i)
+                except Exception:
+                    continue
+        for ep_idx in episode_indices:
+            requests.append(BatchEpisodeRequest(task_name, str(task_dir.resolve()), ep_idx, "<auto>", False, None, None, True))
     return requests
 
 
@@ -645,7 +715,7 @@ def auto_detect_inputs(task_dir: Path, episode_index: int, episode_events_overri
     }
 
 
-def run_single_trim(*, task_dir: Path, episode_index: int, start_sec: float, end_sec: float, output_root: Optional[Path], video: Optional[Path], video_ts: Optional[Path], trajectory: Optional[Path], hdf5: Optional[Path], states_csv: Optional[Path], frame_timestamps_csv: Optional[Path], episode_events_csv: Optional[Path], keep_absolute_timestamps: bool, video_fps: Optional[float], codec: str, seed: int, num_random_start_crops: int, max_random_start_crop_sec: float, min_remaining_sec: float, copy_original_manifest: bool) -> dict[str, Any]:
+def run_single_trim(*, task_dir: Path, episode_index: int, start_sec: Optional[float], end_sec: Optional[float], output_root: Optional[Path], video: Optional[Path], video_ts: Optional[Path], trajectory: Optional[Path], hdf5: Optional[Path], states_csv: Optional[Path], frame_timestamps_csv: Optional[Path], episode_events_csv: Optional[Path], keep_absolute_timestamps: bool, video_fps: Optional[float], codec: str, seed: int, num_random_start_crops: int, max_random_start_crop_sec: float, min_remaining_sec: float, copy_original_manifest: bool, auto_from_events: bool) -> dict[str, Any]:
     task_dir = task_dir.resolve()
     if not task_dir.exists():
         raise FileNotFoundError(f"Task directory does not exist: {task_dir}")
@@ -659,14 +729,16 @@ def run_single_trim(*, task_dir: Path, episode_index: int, start_sec: float, end
     episode_events_path = episode_events_csv if episode_events_csv else auto["episode_events_path"]
     prepared_video_ts_df, prepared_traj_df, episode_events_df, fps, source_notes = prepare_episode_streams(task_dir=task_dir, episode_index=episode_index, video_path=video_path, video_ts_path=video_ts_path, traj_path=traj_path, frame_ts_path=frame_ts_path, episode_events_path=episode_events_path, video_fps_override=video_fps)
     source_notes = list(auto.get("event_resolution_notes", [])) + list(source_notes)
-    base_window = build_window(prepared_video_ts_df, start_sec, end_sec)
+    if start_sec is None or end_sec is None:
+        if not auto_from_events:
+            raise ValueError("start_sec/end_sec are omitted. Use --auto-from-events to extract the full relevant episode window automatically.")
+        start_sec, end_sec, auto_notes = infer_full_window_from_events_or_stream(video_ts_df=prepared_video_ts_df, episode_events_df=episode_events_df, episode_index=episode_index)
+        source_notes.extend(auto_notes)
+    base_window = build_window(prepared_video_ts_df, float(start_sec), float(end_sec))
     final_output_root = (output_root or (task_dir / "trimmed")).resolve()
     final_output_root.mkdir(parents=True, exist_ok=True)
     windows = [base_window] + build_augmented_windows(base_window, num_random_start_crops, max_random_start_crop_sec, min_remaining_sec, seed)
-    results = [
-        trim_once(task_dir=task_dir, episode_index=episode_index, output_root=final_output_root, video_path=video_path, video_ts_path=video_ts_path, traj_path=traj_path, hdf5_path=hdf5_path, states_path=states_path, frame_ts_path=frame_ts_path, episode_events_path=episode_events_path, video_ts_df=prepared_video_ts_df, traj_df=prepared_traj_df, episode_events_df=episode_events_df, source_notes=source_notes, window=window, keep_absolute_timestamps=keep_absolute_timestamps, fps=fps, codec=codec, include_original_manifest=copy_original_manifest)
-        for window in windows
-    ]
+    results = [trim_once(task_dir=task_dir, episode_index=episode_index, output_root=final_output_root, video_path=video_path, video_ts_path=video_ts_path, traj_path=traj_path, hdf5_path=hdf5_path, states_path=states_path, frame_ts_path=frame_ts_path, episode_events_path=episode_events_path, video_ts_df=prepared_video_ts_df, traj_df=prepared_traj_df, episode_events_df=episode_events_df, source_notes=source_notes, window=window, keep_absolute_timestamps=keep_absolute_timestamps, fps=fps, codec=codec, include_original_manifest=copy_original_manifest) for window in windows]
     summary = {
         "task_dir": str(task_dir),
         "episode_index": episode_index,
@@ -699,7 +771,7 @@ def process_batch_episode(payload: dict[str, Any]) -> dict[str, Any]:
     task_dir = Path(request.task_dir).resolve()
     output_root = task_dir / "trimmed" if output_root_base is None else output_root_base / request.task_name
     try:
-        summary = run_single_trim(task_dir=task_dir, episode_index=request.episode_index, start_sec=float(request.start_sec), end_sec=float(request.end_sec), output_root=output_root, video=None, video_ts=None, trajectory=None, hdf5=None, states_csv=None, frame_timestamps_csv=None, episode_events_csv=None, keep_absolute_timestamps=bool(payload["keep_absolute_timestamps"]), video_fps=payload["video_fps"], codec=str(payload["codec"]), seed=int(payload["seed"]), num_random_start_crops=int(payload["num_random_start_crops"]), max_random_start_crop_sec=float(payload["max_random_start_crop_sec"]), min_remaining_sec=float(payload["min_remaining_sec"]), copy_original_manifest=bool(payload["copy_original_manifest"]))
+        summary = run_single_trim(task_dir=task_dir, episode_index=request.episode_index, start_sec=request.start_sec, end_sec=request.end_sec, output_root=output_root, video=None, video_ts=None, trajectory=None, hdf5=None, states_csv=None, frame_timestamps_csv=None, episode_events_csv=None, keep_absolute_timestamps=bool(payload["keep_absolute_timestamps"]), video_fps=payload["video_fps"], codec=str(payload["codec"]), seed=int(payload["seed"]), num_random_start_crops=int(payload["num_random_start_crops"]), max_random_start_crop_sec=float(payload["max_random_start_crop_sec"]), min_remaining_sec=float(payload["min_remaining_sec"]), copy_original_manifest=bool(payload["copy_original_manifest"]), auto_from_events=bool(request.auto_from_events))
         return asdict(BatchEpisodeOutcome(request.task_name, request.task_dir, request.episode_index, request.trim_spec, False, "ok", None, str(output_root / f"episode_{request.episode_index}_trim_summary.json"), summary))
     except Exception as exc:
         return asdict(BatchEpisodeOutcome(request.task_name, request.task_dir, request.episode_index, request.trim_spec, False, "error", str(exc), None, None))
@@ -709,11 +781,16 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
     if args.tasks_root is None:
         raise ValueError("Batch mode requires --tasks-root")
     tasks_root = args.tasks_root.resolve()
-    plans = parse_plan_file(args.plan_file.resolve())
-    requests = build_batch_requests(tasks_root, plans)
     output_root_base = args.output_root.resolve() if args.output_root is not None else None
     if output_root_base is not None:
         output_root_base.mkdir(parents=True, exist_ok=True)
+    if args.plan_file is not None:
+        plans = parse_plan_file(args.plan_file.resolve())
+        requests = build_batch_requests(tasks_root, plans)
+    else:
+        if not args.auto_from_events:
+            raise ValueError("Without --plan-file, batch mode requires --auto-from-events.")
+        requests = build_auto_requests(tasks_root, args.task_glob)
     payloads = [{
         "request": asdict(req),
         "output_root_base": str(output_root_base) if output_root_base is not None else None,
@@ -746,8 +823,9 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
                     break
     outcomes.sort(key=lambda item: (item["task_name"], item["episode_index"]))
     summary = {
-        "plan_file": str(args.plan_file.resolve()),
+        "plan_file": str(args.plan_file.resolve()) if args.plan_file is not None else None,
         "tasks_root": str(tasks_root),
+        "task_glob": args.task_glob,
         "output_root_base": str(output_root_base) if output_root_base is not None else None,
         "submitted": len(requests),
         "jobs": jobs,
@@ -756,8 +834,7 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
         "num_error": sum(1 for item in outcomes if item["status"] == "error"),
         "results": outcomes,
         "notes": [
-            "Each task block maps trim lines to episode indices starting at 0.",
-            "A trim spec 'x' means that episode is skipped.",
+            "If --plan-file is omitted, --auto-from-events processes all matching task dirs and episode indices automatically.",
             "When episode_events.csv exists, its file paths and recording bounds are preferred.",
         ],
     }
@@ -768,14 +845,13 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def validate_mode(args: argparse.Namespace) -> str:
-    single_fields = [args.task_dir, args.episode_index, args.start_sec, args.end_sec]
-    single_mode = all(value is not None for value in single_fields)
-    batch_mode = args.plan_file is not None
-    if single_mode and batch_mode:
+    single_mode = args.task_dir is not None and args.episode_index is not None
+    batch_mode = args.tasks_root is not None or args.plan_file is not None
+    if single_mode and batch_mode and args.plan_file is not None:
         raise ValueError("Choose either single-episode mode or batch mode, not both.")
     if not single_mode and not batch_mode:
-        raise ValueError("Provide either --task-dir/--episode-index/--start-sec/--end-sec for single mode, or --plan-file/--tasks-root for batch mode.")
-    return "batch" if batch_mode else "single"
+        raise ValueError("Provide either --task-dir/--episode-index or --tasks-root/--plan-file.")
+    return "single" if single_mode else "batch"
 
 
 def main() -> None:
@@ -784,13 +860,12 @@ def main() -> None:
     if mode == "batch":
         print(json.dumps(run_batch(args), indent=2))
         return
-    summary = run_single_trim(task_dir=args.task_dir, episode_index=int(args.episode_index), start_sec=float(args.start_sec), end_sec=float(args.end_sec), output_root=args.output_root, video=args.video, video_ts=args.video_ts, trajectory=args.trajectory, hdf5=args.hdf5, states_csv=args.states_csv, frame_timestamps_csv=args.frame_timestamps_csv, episode_events_csv=args.episode_events_csv, keep_absolute_timestamps=args.keep_absolute_timestamps, video_fps=args.video_fps, codec=args.codec, seed=args.seed, num_random_start_crops=args.num_random_start_crops, max_random_start_crop_sec=args.max_random_start_crop_sec, min_remaining_sec=args.min_remaining_sec, copy_original_manifest=args.copy_original_manifest)
+    summary = run_single_trim(task_dir=args.task_dir, episode_index=int(args.episode_index), start_sec=args.start_sec, end_sec=args.end_sec, output_root=args.output_root, video=args.video, video_ts=args.video_ts, trajectory=args.trajectory, hdf5=args.hdf5, states_csv=args.states_csv, frame_timestamps_csv=args.frame_timestamps_csv, episode_events_csv=args.episode_events_csv, keep_absolute_timestamps=args.keep_absolute_timestamps, video_fps=args.video_fps, codec=args.codec, seed=args.seed, num_random_start_crops=args.num_random_start_crops, max_random_start_crop_sec=args.max_random_start_crop_sec, min_remaining_sec=args.min_remaining_sec, copy_original_manifest=args.copy_original_manifest, auto_from_events=args.auto_from_events)
     print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
 
 """
 python trim_fastumi_episode_patched.py \
