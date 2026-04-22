@@ -9,6 +9,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+import h5py
+
 
 def natural_key(value: str):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', value)]
@@ -19,6 +21,7 @@ class EpisodeSpec:
     episode_index: int
     source_dir: Path
     source_hdf5: Path
+    validation_errors: list[str] | None = None
 
 
 @dataclass
@@ -82,8 +85,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--link-mode',
         choices=('symlink', 'hardlink', 'copy'),
-        default='symlink',
+        default='copy',
         help='How to materialize each trimmed HDF5 in the repacked output.',
+    )
+    parser.add_argument(
+        '--validate-hdf5',
+        action='store_true',
+        help='Open each source HDF5 and validate action, observations/qpos, and observations/images/front before repacking.',
+    )
+    parser.add_argument(
+        '--skip-corrupt-runs',
+        action='store_true',
+        help='Skip any run that contains at least one unreadable or structurally invalid HDF5 episode.',
     )
     parser.add_argument(
         '--manifest-name',
@@ -154,6 +167,56 @@ def discover_runs(dataset_root: Path, run_glob: str, trim_dir_name: str, trim_la
     return run_specs
 
 
+def validate_episode_hdf5(episode: EpisodeSpec) -> list[str]:
+    errors: list[str] = []
+    try:
+        with h5py.File(episode.source_hdf5, 'r') as handle:
+            for key in ('action', 'observations/qpos', 'observations/images/front'):
+                try:
+                    obj = handle[key]
+                    _ = obj.shape
+                except Exception as exc:
+                    errors.append(f'{key}: {type(exc).__name__}: {exc}')
+    except Exception as exc:
+        errors.append(f'open: {type(exc).__name__}: {exc}')
+    return errors
+
+
+def validate_run_specs(run_specs: list[RunSpec], skip_corrupt_runs: bool) -> tuple[list[RunSpec], list[dict]]:
+    valid_runs: list[RunSpec] = []
+    skipped_runs: list[dict] = []
+    for run_spec in run_specs:
+        episode_failures = []
+        for episode in run_spec.episodes:
+            errors = validate_episode_hdf5(episode)
+            episode.validation_errors = errors or None
+            if errors:
+                episode_failures.append(
+                    {
+                        'episode_index': episode.episode_index,
+                        'source_hdf5': str(episode.source_hdf5),
+                        'errors': errors,
+                    }
+                )
+        if episode_failures:
+            if skip_corrupt_runs:
+                skipped_runs.append(
+                    {
+                        'run_name': run_spec.run_name,
+                        'run_dir': str(run_spec.run_dir),
+                        'episode_count': len(run_spec.episodes),
+                        'reason': 'corrupt_hdf5',
+                        'episodes': episode_failures,
+                    }
+                )
+                continue
+            raise ValueError(
+                f'Corrupt or invalid HDF5 content detected in run {run_spec.run_name}: {episode_failures}'
+            )
+        valid_runs.append(run_spec)
+    return valid_runs, skipped_runs
+
+
 def filter_run_specs(
     run_specs: list[RunSpec],
     expected_episodes: int | None,
@@ -200,7 +263,7 @@ def materialize_file(source: Path, destination: Path, link_mode: str):
 
 def build_manifest(
     kept_runs: list[RunSpec],
-    skipped_runs: list[RunSpec],
+    skipped_runs: list[dict],
     dataset_root: Path,
     output_root: Path,
     group_prefix: str,
@@ -239,12 +302,7 @@ def build_manifest(
         'kept_run_count': len(kept_runs),
         'skipped_run_count': len(skipped_runs),
         'skipped_runs': [
-            {
-                'run_name': run_spec.run_name,
-                'run_dir': str(run_spec.run_dir),
-                'episode_count': len(run_spec.episodes),
-            }
-            for run_spec in skipped_runs
+            skipped_run for skipped_run in skipped_runs
         ],
         'groups': groups,
     }
@@ -270,10 +328,28 @@ def main():
         trim_dir_name=args.trim_dir_name,
         trim_label=args.trim_label,
     )
-    kept_runs, skipped_runs, dominant_count = filter_run_specs(
+
+    skipped_runs: list[dict] = []
+    if args.validate_hdf5:
+        run_specs, corrupt_skipped_runs = validate_run_specs(
+            run_specs=run_specs,
+            skip_corrupt_runs=args.skip_corrupt_runs,
+        )
+        skipped_runs.extend(corrupt_skipped_runs)
+
+    kept_runs, incomplete_run_specs, dominant_count = filter_run_specs(
         run_specs=run_specs,
         expected_episodes=args.expected_episodes,
         skip_incomplete_runs=args.skip_incomplete_runs,
+    )
+    skipped_runs.extend(
+        {
+            'run_name': run_spec.run_name,
+            'run_dir': str(run_spec.run_dir),
+            'episode_count': len(run_spec.episodes),
+            'reason': 'incomplete_run',
+        }
+        for run_spec in incomplete_run_specs
     )
 
     manifest = build_manifest(
@@ -288,11 +364,11 @@ def main():
     )
 
     print(
-        f'Found {len(run_specs)} trimmed run(s); '
+        f'Found {len(kept_runs) + len(skipped_runs)} trimmed run(s); '
         f'keeping {len(kept_runs)} with {dominant_count} episode(s) each'
     )
     if skipped_runs:
-        skipped_names = ', '.join(run_spec.run_name for run_spec in skipped_runs)
+        skipped_names = ', '.join(item['run_name'] for item in skipped_runs)
         print(f'Skipping incomplete runs: {skipped_names}')
 
     if args.dry_run:
