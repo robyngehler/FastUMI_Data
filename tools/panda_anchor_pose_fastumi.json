@@ -1,0 +1,134 @@
+{
+  "created_at_utc": "2026-04-23T08:37:11.701530+00:00",
+  "label": "panda_anchor_pose_fastumi",
+  "rpc_connection": {
+    "ip": "192.168.1.100",
+    "port": 4242,
+    "path": "inference -> zerorpc bridge -> local polymetis"
+  },
+  "frame_metadata": {
+    "raw_runtime_frame": "panda_link8",
+    "ik_target_frame": "panda_hand_tcp",
+    "fastumi_tcp_frame": "panda_softtip",
+    "link8_to_hand_rotation_deg_z": -45.0,
+    "link8_to_hand_translation_m": 0.1034,
+    "soft_tip_offset_m": 0.09
+  },
+  "start_qpos": [
+    1.3326468467712402,
+    -0.6569091081619263,
+    -2.2918572425842285,
+    -2.4129135608673096,
+    1.9865143299102783,
+    2.1290204524993896,
+    0.7392184138298035
+  ],
+  "raw_link8_pose": {
+    "position_m": [
+      0.33539846539497375,
+      -0.3249203562736511,
+      0.1484432965517044
+    ],
+    "rotvec_xyz": [
+      0.5614209710736697,
+      1.5209817024083039,
+      0.5642777773062294
+    ],
+    "quaternion_xyzw": [
+      0.24748940597898889,
+      0.6704894854819159,
+      0.2487487627075791,
+      0.6536948040468209
+    ],
+    "euler_xyz_deg": [
+      91.88388738496688,
+      48.89147892741693,
+      91.99286889798682
+    ]
+  },
+  "hand_pose": {
+    "position_m": [
+      0.43876913626375297,
+      -0.323886171978254,
+      0.1462083766467243
+    ],
+    "rotvec_xyz": [
+      -0.06224762901668436,
+      1.5913782609432587,
+      -0.04533350117791764
+    ],
+    "quaternion_xyzw": [
+      -0.02793482097155834,
+      0.7141616077548023,
+      -0.020344280728823053,
+      0.6991272802773395
+    ],
+    "euler_xyz_deg": [
+      -107.60454454368127,
+      85.90185510986886,
+      -106.98909820126245
+    ]
+  },
+  "fastumi_tcp_pose": {
+    "position_m": [
+      0.5287436080064041,
+      -0.3229860115663996,
+      0.14426308852826963
+    ],
+    "rotvec_xyz": [
+      -0.06224762901668436,
+      1.5913782609432587,
+      -0.04533350117791764
+    ],
+    "quaternion_xyzw": [
+      -0.02793482097155834,
+      0.7141616077548023,
+      -0.020344280728823053,
+      0.6991272802773395
+    ],
+    "euler_xyz_deg": [
+      -107.60454454368127,
+      85.90185510986886,
+      -106.98909820126245
+    ]
+  },
+  "fastumi_relevant_values": {
+    "start_qpos": [
+      1.3326468467712402,
+      -0.6569091081619263,
+      -2.2918572425842285,
+      -2.4129135608673096,
+      1.9865143299102783,
+      2.1290204524993896,
+      0.7392184138298035
+    ],
+    "robot_anchor_tcp_position_m": [
+      0.5287436080064041,
+      -0.3229860115663996,
+      0.14426308852826963
+    ],
+    "robot_anchor_tcp_rotvec_xyz": [
+      -0.06224762901668436,
+      1.5913782609432587,
+      -0.04533350117791764
+    ],
+    "robot_anchor_tcp_quaternion_xyzw": [
+      -0.02793482097155834,
+      0.7141616077548023,
+      -0.020344280728823053,
+      0.6991272802773395
+    ],
+    "robot_anchor_tcp_euler_xyz_deg": [
+      -107.60454454368127,
+      85.90185510986886,
+      -106.98909820126245
+    ]
+  },
+  "notes": [
+    "Raw bridge pose is treated as panda_link8.",
+    "The local operational hand frame includes the fixed 0.1034 m hand_tcp extension from the URDF.",
+    "FastUMI IK target frame is the operational panda_hand_tcp-aligned frame.",
+    "FastUMI TCP keeps panda_hand_tcp orientation and applies only a forward local-Z translation.",
+    "Use the FastUMI TCP pose for base_position/base_orientation in the Panda recording config."
+  ]
+}

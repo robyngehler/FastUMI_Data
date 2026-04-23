@@ -31,14 +31,14 @@
       "ik_base_elements": ["base"],
       "aruco_dict": "DICT_4X4_50",
       "base_position": {
-          "x": 0.64071,
-          "y": -0.34948,
-          "z": 0.37141
+          "x": 0.52874,
+          "y": -0.32298,
+          "z": 0.14426
       },
       "base_orientation": {
-          "roll": -135.9873,
-          "pitch": 79.4097,
-          "yaw": -135.8613
+          "roll": -107.6045,
+          "pitch": 85.9018,
+          "yaw": -106.9891
       },
       "offset": {
           "x": 0.1489,
@@ -61,13 +61,12 @@
           "notes": "The runtime bridge still reports panda_link8. For IK postprocessing, use the serial fer_franka_hand.urdf because it terminates at hand_tcp, whereas panda_arm_hand.urdf branches into a finger link in ikpy. distances.flange_to_tcp is used as the panda_hand_tcp to panda_softtip offset in data_processing_to_joint.py."
       },
       "start_qpos": [
-          1.1461714506149292,
-            -1.5383373498916626,
-            -1.5858408212661743,
-            -2.0414700508117676,
-            -2.0066282749176025,
-            3.025059461593628,
-            -2.0232622623443604
+          1.3326468467712402,
+    -0.6569091081619263,
+    -2.2918572425842285,
+    -2.4129135608673096,
+    1.9865143299102783,
+    2.12902045249938964
       ]
   }
 }
